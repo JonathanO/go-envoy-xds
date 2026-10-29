@@ -5,7 +5,7 @@ go 1.26.0
 replace github.com/JonathanO/go-envoy-xds => ../
 
 require (
-	github.com/JonathanO/envoy-xds-testing-go v0.0.0-20261029122938-59bbe10f349a
+	github.com/JonathanO/envoy-xds-testing-go v0.0.0-20261029165603-fb6f178347c9
 	github.com/JonathanO/go-envoy-xds v0.0.0-00010101000000-000000000000
 	github.com/envoyproxy/go-control-plane/envoy v1.40.0
 	google.golang.org/grpc v1.85.0
