@@ -169,7 +169,7 @@ func TestThousandsOfEnvoysNeedNoGoroutinesOfTheirOwn(t *testing.T) {
 			c.EditGroup("all", func(e *Editor) { e.Put(&clusterv3.Cluster{Name: fmt.Sprint("cluster-", i)}) })
 		})
 	}
-	if after := runtime.NumGoroutine(); after != before {
+	if after := runtime.NumGoroutine(); after > before { // others, e.g. earlier tests', may have ended meanwhile
 		t.Errorf("%d goroutines, then %d", before, after)
 	}
 	for _, f := range envoys {
