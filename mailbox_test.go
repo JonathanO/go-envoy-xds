@@ -48,11 +48,26 @@ func TestMailboxQueuesWhatDoesNotMerge(t *testing.T) {
 
 func TestMailboxMergesNothingIntoTheEndOfAPhase(t *testing.T) {
 	m := newMailbox[phased]()
-	m.put(phased{summed{1}, true})
+	m.put(phased{summed{0}, false})
+	m.put(phased{summed{1}, true}) // what's before still merges into it
 	m.put(phased{summed{2}, false})
 	m.put(phased{summed{3}, false})
 	got := drain(m)
-	if len(got) != 2 || !slices.Equal(got[0].summed, summed{1}) || !slices.Equal(got[1].summed, summed{2, 3}) {
+	if len(got) != 2 || !slices.Equal(got[0].summed, summed{0, 1}) || !slices.Equal(got[1].summed, summed{2, 3}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestMailboxIsEmptyUntilPutAndOnceTaken(t *testing.T) {
+	m := newMailbox[int]()
+	if u, ok := m.take(); ok {
+		t.Fatalf("took %v from an empty mailbox", u)
+	}
+	m.put(1)
+	if u, ok := m.take(); !ok || u != 1 {
+		t.Fatalf("took %v, %v", u, ok)
+	}
+	if u, ok := m.take(); ok {
+		t.Fatalf("took %v from an emptied mailbox", u)
 	}
 }
