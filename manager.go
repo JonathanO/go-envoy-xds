@@ -3,6 +3,7 @@ package xds
 import (
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -30,12 +31,13 @@ func usesClusters(t TypeURL) bool {
 // A manager sequences one stream's services: it pushes each change make before break, one type at a time, waiting for
 // Envoy to ACK each before the next. Only the stream's goroutine calls it.
 type manager[R request, U any] struct {
-	services map[TypeURL]service[R, U]
-	adds     []service[R, U] // in add order
-	removes  []service[R, U] // in remove order
-	mailbox  *mailbox[U]
-	metrics  Metrics
-	log      *slog.Logger
+	services    map[TypeURL]service[R, U]
+	adds        []service[R, U] // in add order
+	removes     []service[R, U] // in remove order
+	mailbox     *mailbox[U]
+	unsubscribe func() // from the Source
+	metrics     Metrics
+	log         *slog.Logger
 
 	pushing   bool  // a change is under way
 	round     round // of the change under way
@@ -77,9 +79,10 @@ func newManager[R request, U, D any](services map[TypeURL]service[R, U], cfg Env
 	return m
 }
 
-// init sets the state all later changes follow on from.
-func (m *manager[R, U]) init(state U) {
+// init sets the state all later changes follow on from, and how to stop them.
+func (m *manager[R, U]) init(state U, unsubscribe func()) {
 	m.started = time.Now()
+	m.unsubscribe = sync.OnceFunc(unsubscribe)
 	for t, s := range m.services {
 		s.init(state)
 		s.setDeferRemovals(func() bool { return !m.mayRemove(t) })
@@ -90,7 +93,7 @@ func (m *manager[R, U]) init(state U) {
 func (m *manager[R, U]) process(req R) error {
 	t := TypeURL(req.GetTypeUrl())
 	s := m.services[t]
-	if usesClusters(t) && req.GetErrorDetail() == nil && !s.awaitingAck() && m.clustersAwaitingAck() {
+	if usesClusters(t) && !s.awaitingAck() && m.clustersAwaitingAck() {
 		// Answer later, in add order. Never hold an ACK this service is waiting for.
 		m.held = append(m.held, req)
 		return nil
@@ -102,12 +105,10 @@ func (m *manager[R, U]) process(req R) error {
 		m.freeze()
 	}
 	m.updateOutstanding(s)
-	if !m.frozen {
-		if m.pushing {
-			m.continuePush() // it may be the ACK the push waits for
-		} else {
-			m.pushAllowedWork()
-		}
+	if m.pushing {
+		m.continuePush() // it may be the ACK the push waits for
+	} else {
+		m.pushAllowedWork()
 	}
 	for len(m.held) > 0 && !m.clustersAwaitingAck() {
 		req := m.held[0]
@@ -121,12 +122,16 @@ func (m *manager[R, U]) process(req R) error {
 
 // updatesWaiting is called when the mailbox may have updates.
 func (m *manager[R, U]) updatesWaiting() {
-	if !m.frozen && !m.pushing {
+	if !m.pushing {
 		m.pushAllowedWork() // stale removals go first, then the change
 	}
 }
 
-func (m *manager[R, U]) close() { m.metrics.Closed() }
+// close is called when the stream ends.
+func (m *manager[R, U]) close() {
+	m.unsubscribe()
+	m.metrics.Closed()
+}
 
 func (m *manager[R, U]) clustersAwaitingAck() bool {
 	return m.services[ClusterType].awaitingAck() || m.services[EndpointType].awaitingAck()
@@ -180,20 +185,16 @@ func (m *manager[R, U]) updateOutstanding(s service[R, U]) {
 // each answer is the whole set: resending it changes nothing Envoy has, where rolling it back would undo any part of
 // it Envoy took.
 func (m *manager[R, U]) freeze() {
-	if m.frozen {
-		return
-	}
 	m.frozen = true
+	m.unsubscribe()
 	if m.pushing {
 		m.pushing = false
 		m.waitingOn = nil
-		m.round = idle
 		for _, s := range m.services {
 			s.abandon()
 		}
 		m.metrics.PushCompleted()
 	}
-	m.mailbox.close()
 }
 
 func (m *manager[R, U]) waitedTooLong() bool { return time.Since(m.started) >= waitForAck }
@@ -208,7 +209,7 @@ func (m *manager[R, U]) pushAllowed() bool {
 }
 
 func (m *manager[R, U]) pushAllowedWork() {
-	if len(m.outstanding) > 0 {
+	if m.frozen || len(m.outstanding) > 0 {
 		return
 	}
 	m.pushDeferredRemovals() // the ACK one waits for holds the change too: see pushAllowed
@@ -262,7 +263,6 @@ func (m *manager[R, U]) continuePush() {
 		if s == nil {
 			m.metrics.PushCompleted()
 			m.pushing = false
-			m.round = idle
 			m.pushAllowedWork()
 			return
 		}

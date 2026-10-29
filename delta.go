@@ -3,10 +3,8 @@ package xds
 import (
 	"maps"
 	"slices"
-	"strconv"
 
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -17,18 +15,17 @@ type deltaService[U, D any] struct {
 	fail func(error)
 	subs deltaSubs
 
-	version       uint64 // of the last response; also its nonce
 	unanswered    string // nonce of the response Envoy hasn't answered, or ""
-	deferred      set    // stale names Envoy kept over a reconnect, to remove in remove order
 	deferRemovals func() bool
-	// What subscriptions were answered with while the staged change waited its turn, so it needn't send them again.
-	answeredDuringChange map[string]proto.Message
+	// Names subscriptions were answered with while the staged change waited its turn. They were answered from the
+	// change, so it needn't send them again.
+	answeredDuringChange set
 }
 
 func (s *deltaService[U, D]) process(req *discoveryv3.DeltaDiscoveryRequest) error {
 	s.active = true
 	// An ACK, or a NACK if it has error detail: either way, answered. The manager sends no more changes after a NACK.
-	if n := req.GetResponseNonce(); n != "" && n == s.unanswered {
+	if req.GetResponseNonce() == s.unanswered {
 		s.unanswered = ""
 	}
 	// Envoy puts subscription changes it has queued into its ACKs, so one request can do both.
@@ -63,11 +60,10 @@ func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(stri
 	for _, r := range rs {
 		delete(removed, r.Name)
 		delete(stale, r.Name)
-		delete(s.deferred, r.Name)
 	}
 	if s.round == adding {
 		for _, r := range rs {
-			s.answeredDuringChange[r.Name] = r.Message
+			s.answeredDuringChange[r.Name] = struct{}{}
 		}
 	}
 	if s.deferRemovals() {
@@ -78,22 +74,11 @@ func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(stri
 	s.push(rs, slices.Sorted(maps.Keys(removed)))
 }
 
-func (s *deltaService[U, D]) sendAdds() {
-	if r, ok := s.adds(s.subs.subscribed); ok {
-		s.pushChange(r)
-	}
-}
-
-func (s *deltaService[U, D]) sendRemoves() {
-	if r, ok := s.removes(s.subs.subscribed); ok {
-		s.pushChange(r)
-	}
-}
+func (s *deltaService[U, D]) sendAdds()    { s.pushChange(s.adds(s.subs.subscribed)) }
+func (s *deltaService[U, D]) sendRemoves() { s.pushChange(s.removes(s.subs.subscribed)) }
 
 func (s *deltaService[U, D]) pushChange(r Response) {
-	updates := slices.DeleteFunc(slices.Clone(r.Updates), func(u Resource) bool {
-		return same(u.Message, s.answeredDuringChange[u.Name])
-	})
+	updates := slices.DeleteFunc(slices.Clone(r.Updates), func(u Resource) bool { return s.answeredDuringChange.has(u.Name) })
 	clear(s.answeredDuringChange)
 	if len(updates) > 0 || len(r.Removes) > 0 {
 		s.push(updates, r.Removes)
@@ -103,7 +88,6 @@ func (s *deltaService[U, D]) pushChange(r Response) {
 func (s *deltaService[U, D]) awaitingAck() bool { return s.unanswered != "" }
 
 func (s *deltaService[U, D]) setDeferRemovals(f func() bool) { s.deferRemovals = f }
-func (s *deltaService[U, D]) deferredRemovals() bool         { return len(s.deferred) > 0 }
 
 func (s *deltaService[U, D]) sendDeferredRemovals() {
 	removals := set{}
@@ -113,7 +97,7 @@ func (s *deltaService[U, D]) sendDeferredRemovals() {
 		}
 	}
 	for _, r := range s.resources(s.subs.subscribed) {
-		delete(removals, r.Name)
+		delete(removals, r.Name) // there at the reconnect, or back since
 	}
 	clear(s.deferred)
 	if len(removals) > 0 {
@@ -122,8 +106,7 @@ func (s *deltaService[U, D]) sendDeferredRemovals() {
 }
 
 func (s *deltaService[U, D]) push(rs []Resource, removes []string) {
-	s.version++
-	v := strconv.FormatUint(s.version, 10)
+	v := s.nextVersion()
 	resp := &discoveryv3.DeltaDiscoveryResponse{TypeUrl: string(s.typ), SystemVersionInfo: v, Nonce: v, RemovedResources: removes}
 	for _, r := range rs {
 		a, err := anypb.New(r.Message)
@@ -134,6 +117,5 @@ func (s *deltaService[U, D]) push(rs []Resource, removes []string) {
 		resp.Resources = append(resp.Resources, &discoveryv3.Resource{Name: r.Name, Version: v, Resource: a})
 	}
 	s.unanswered = v
-	s.answered = true
 	s.send(resp)
 }

@@ -63,3 +63,26 @@ func TestBuildersReturningWhatEnvoyDidNotAskForAreWarnedAbout(t *testing.T) {
 		}
 	})
 }
+
+func TestTypesEnvoyHasNotAskedForAreNotBuilt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &counter{}
+		srv, err := xds.NewServer(xds.ServerConfig[int, string]{
+			Source:   src,
+			Builders: []xds.ConfigBuilder[int, string]{leaky{}},
+			ConfigFor: func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+				return xds.EnvoyConfig[string]{}, nil
+			},
+			Logger: slog.New(slog.DiscardHandler),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := &deltaEnvoy{start(t, srv.DeltaAggregatedResources)}
+		e.ack(e.subscribe(xds.ClusterType)[0]) // which nothing serves
+		src.deliver(1)
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want nothing: Envoy hasn't asked for endpoints", sent)
+		}
+	})
+}

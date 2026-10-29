@@ -84,7 +84,7 @@ func (w *sotwWildcard) update(names []string) (func(string) bool, bool) {
 	case all && !was:
 		return func(string) bool { return true }, true
 	case was && !all:
-		return added, true // the caller drops what's no longer subscribed; the rest it has
+		return nil, true // the caller drops what's no longer subscribed; the rest it has
 	}
 	return added, changed
 }
@@ -149,8 +149,7 @@ func (w *deltaWildcard) update(subscribe, unsubscribe []string) (func(string) bo
 		subscribe = withoutWildcard(subscribe)
 	}
 	if slices.Contains(unsubscribe, wildcard) {
-		w.all = false
-		unsubscribe = withoutWildcard(unsubscribe)
+		w.all = false // and the names leave it be: none is the wildcard
 	}
 	added, changed, err := w.names.update(subscribe, unsubscribe)
 	if err != nil {

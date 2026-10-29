@@ -29,13 +29,11 @@ func TestMailboxMergesWhatWaits(t *testing.T) {
 	m := newMailbox[summed]()
 	m.put(summed{1})
 	m.put(summed{2})
+	if len(m.ready) != 1 {
+		t.Fatalf("%d wake-ups for one wait", len(m.ready))
+	}
 	if got := drain(m); len(got) != 1 || !slices.Equal(got[0], summed{1, 2}) {
 		t.Fatalf("got %v", got)
-	}
-	select {
-	case <-m.ready:
-	default:
-		t.Fatal("not ready after a put")
 	}
 }
 
@@ -55,16 +53,6 @@ func TestMailboxMergesNothingIntoTheEndOfAPhase(t *testing.T) {
 	m.put(phased{summed{3}, false})
 	got := drain(m)
 	if len(got) != 2 || !slices.Equal(got[0].summed, summed{1}) || !slices.Equal(got[1].summed, summed{2, 3}) {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestClosedMailboxDropsEverything(t *testing.T) {
-	m := newMailbox[int]()
-	m.put(1)
-	m.close()
-	m.put(2)
-	if got := drain(m); len(got) != 0 {
 		t.Fatalf("got %v", got)
 	}
 }

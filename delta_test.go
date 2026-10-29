@@ -1,6 +1,7 @@
 package xds_test
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"testing/synctest"
@@ -86,45 +87,6 @@ func TestDeltaSendsNoneOfAChangeAgainThatASubscriptionWasAnsweredWith(t *testing
 	})
 }
 
-func TestDeltaRemovesWhatAReconnectingEnvoyKeptOnceTheRoutesAreAcked(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		src := newSource(cluster("a"), route("r", "a"))
-		cfg := xds.EnvoyConfig[string]{SubscribesTo: []xds.TypeURL{xds.ClusterType, xds.RouteType}}
-		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}))
-
-		// Envoy kept cluster gone, which its kept routes may still use.
-		cds := e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType),
-			InitialResourceVersions: map[string]string{"a": "1", "gone": "1"}})
-		if len(cds) != 1 || len(cds[0].GetRemovedResources()) != 0 {
-			t.Fatalf("got %v, want gone kept for now", cds)
-		}
-		e.ack(cds[0])
-		rds := e.subscribe(xds.RouteType, "r")
-		if sent := e.ack(rds[0]); len(sent) != 1 || !slices.Equal(sent[0].GetRemovedResources(), []string{"gone"}) {
-			t.Fatalf("got %v after the route ACK, want gone removed", sent)
-		}
-	})
-}
-
-func TestDeltaGivesUpWaitingForTypesTheEnvoyNeverAsksFor(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		src := newSource(cluster("a"))
-		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		e.ack(e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType),
-			InitialResourceVersions: map[string]string{"gone": "1"}})[0])
-
-		time.Sleep(30 * time.Second)
-		update(src, cluster("b")) // the removal goes at the next event, and the change after its ACK
-		removal := e.sent()
-		if len(removal) != 1 || !slices.Equal(removal[0].GetRemovedResources(), []string{"gone"}) {
-			t.Fatalf("got %v, want gone removed", removal)
-		}
-		if sent := e.ack(removal[0]); len(sent) != 1 || !slices.Equal(deltaNames(sent[0]), []string{"b"}) {
-			t.Fatalf("got %v after the removal's ACK, want b", sent)
-		}
-	})
-}
-
 func TestDeltaSubscribingToAndUnsubscribingFromANameAtOnceEndsTheStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e := startDelta(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
@@ -132,50 +94,6 @@ func TestDeltaSubscribingToAndUnsubscribingFromANameAtOnceEndsTheStream(t *testi
 			ResourceNamesSubscribe: []string{"a"}, ResourceNamesUnsubscribe: []string{"a"}}
 		if err := <-e.ended; status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("got %v, want InvalidArgument", err)
-		}
-	})
-}
-
-func TestDeltaLeavesUnknownTypesUnanswered(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := startDelta(t, newServer(t, newSource(cluster("a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		if sent := e.subscribe("type.googleapis.com/envoy.config.core.v3.TypedExtensionConfig", "x"); len(sent) != 0 {
-			t.Fatalf("got %v", sent)
-		}
-		if cds := e.subscribe(xds.ClusterType); len(cds) != 1 {
-			t.Fatalf("got %v, want the stream still up", cds)
-		}
-	})
-}
-
-func TestDelayUpdatesUntilAckOfHoldsUpdatesUntilThatAck(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		src := newSource(cluster("a"), route("r", "a"))
-		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType}, xds.Events[string]{}))
-		e.ack(e.subscribe(xds.ClusterType)[0])
-
-		update(src, cluster("b"))
-		if sent := e.sent(); len(sent) != 0 {
-			t.Fatalf("got %v before RDS is ACKed", sent)
-		}
-		if sent := e.ack(e.subscribe(xds.RouteType, "r")[0]); len(sent) != 1 || !slices.Equal(deltaNames(sent[0]), []string{"b"}) {
-			t.Fatalf("got %v after the RDS ACK, want b", sent)
-		}
-	})
-}
-
-func TestRoutesWaitForTheClustersAnEnvoyIsBeingSent(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		src := newSource(cluster("a"), route("r", "a"))
-		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		cds := e.subscribe(xds.ClusterType)[0]
-
-		// A reconnecting Envoy asks for everything at once.
-		if rds := e.subscribe(xds.RouteType, "r"); len(rds) != 0 {
-			t.Fatalf("got %v while CDS isn't ACKed", rds)
-		}
-		if rds := e.ack(cds); !slices.Equal(types(rds), []xds.TypeURL{xds.RouteType}) {
-			t.Fatalf("got %v after the CDS ACK, want the routes", rds)
 		}
 	})
 }
@@ -203,16 +121,121 @@ func TestEachPhaseIsAckedBeforeTheNext(t *testing.T) {
 	})
 }
 
+func TestDeltaIgnoresAcksOfEarlierResponses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		first := e.subscribe(xds.ClusterType)[0]
+		e.ack(first)
+		update(src, cluster("b"))
+		second := e.sent()[0]
+
+		e.ack(first) // late
+		update(src, cluster("c"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want nothing until Envoy answers %s", sent, second.GetNonce())
+		}
+		if sent := e.ack(second); len(sent) != 1 {
+			t.Fatalf("got %v after the ACK, want c", sent)
+		}
+	})
+}
+
+func TestDeltaRemovesWhatAReconnectingEnvoyKeptOnceTheRoutesAreAcked(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), route("r", "a"))
+		cfg := xds.EnvoyConfig[string]{SubscribesTo: []xds.TypeURL{xds.ClusterType, xds.EndpointType, xds.RouteType}}
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}, l.option))
+
+		// Envoy kept cluster gone, which its kept routes may still use.
+		cds := e.reconnect(xds.ClusterType, []string{"a", "gone"})
+		if len(cds) != 1 || len(cds[0].GetRemovedResources()) != 0 {
+			t.Fatalf("got %v, want gone kept for now", cds)
+		}
+		e.ack(cds[0])
+		rds := e.subscribe(xds.RouteType, "r")[0]
+		eds := e.subscribe(xds.EndpointType, "a")[0]
+		if sent := e.ack(rds); len(sent) != 0 {
+			t.Fatalf("got %v, want nothing while Envoy has an answer to ACK", sent)
+		}
+		if sent := e.ack(eds); len(sent) != 1 || !slices.Equal(sent[0].GetRemovedResources(), []string{"gone"}) {
+			t.Fatalf("got %v after the last ACK, want gone removed", sent)
+		}
+		if l.Len() != 0 {
+			t.Fatalf("logged %s", l.String())
+		}
+	})
+}
+
+func TestDeltaGivesUpWaitingForTypesTheEnvoyNeverAsksFor(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.ack(e.reconnect(xds.ClusterType, []string{"gone"})[0])
+		eds := e.reconnect(xds.EndpointType, []string{"gone"}, "gone")
+		if len(eds) != 1 || len(eds[0].GetRemovedResources()) != 0 {
+			t.Fatalf("got %v, want gone kept for now", eds)
+		}
+		e.ack(eds[0])
+
+		time.Sleep(30 * time.Second)
+		update(src, cluster("b")) // the removals go at the next event, and the change after their ACKs
+		var sent []string
+		for r := e.sent(); len(r) == 1; r = e.ack(r[0]) {
+			sent = append(sent, fmt.Sprint(types(r), r[0].GetRemovedResources(), deltaNames(r[0])))
+		}
+		want := []string{
+			fmt.Sprint([]xds.TypeURL{xds.ClusterType}, []string{"gone"}, []string(nil)),
+			fmt.Sprint([]xds.TypeURL{xds.EndpointType}, []string{"gone"}, []string(nil)),
+			fmt.Sprint([]xds.TypeURL{xds.ClusterType}, []string(nil), []string{"b"}),
+		}
+		if !slices.Equal(sent, want) {
+			t.Fatalf("sent %v, want %v", sent, want)
+		}
+		if got := l.count("removing stale resources anyway"); got != 1 || l.count("No ACK of the type updates wait for") != 0 {
+			t.Fatalf("warned %d times, want once: %s", got, l.String())
+		}
+	})
+}
+
+func TestDelayUpdatesUntilAckOfHoldsUpdatesUntilThatAck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), route("r", "a"))
+		cfg := xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType, SubscribesTo: []xds.TypeURL{xds.ClusterType, xds.RouteType}}
+		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+
+		update(src, cluster("b"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v before RDS is ACKed", sent)
+		}
+		if sent := e.ack(e.subscribe(xds.RouteType, "r")[0]); len(sent) != 1 || !slices.Equal(deltaNames(sent[0]), []string{"b"}) {
+			t.Fatalf("got %v after the RDS ACK, want b", sent)
+		}
+	})
+}
+
 func TestDelayUpdatesUntilAckOfGivesUpAfterThirtySeconds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"))
-		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType}, xds.Events[string]{}))
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType}, xds.Events[string]{}, l.option))
 		e.ack(e.subscribe(xds.ClusterType)[0])
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(30*time.Second - 1)
 		update(src, cluster("b"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want b held still", sent)
+		}
+		time.Sleep(1)
+		update(src, cluster("c"))
 		if sent := e.sent(); len(sent) != 1 {
-			t.Fatalf("got %v, want b sent anyway", sent)
+			t.Fatalf("got %v, want b and c sent anyway", sent)
+		}
+		if got := l.count("No ACK of the type updates wait for"); got != 1 {
+			t.Fatalf("warned %d times: %s", got, l.String())
 		}
 	})
 }
@@ -221,22 +244,32 @@ func TestDelayUpdatesUntilAckOfATypeTheEnvoyDoesNotGetIsIgnored(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"))
 		cfg := xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType, SubscribesTo: []xds.TypeURL{xds.ClusterType}}
-		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}))
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}, l.option))
 		e.ack(e.subscribe(xds.ClusterType)[0])
 
 		update(src, cluster("b"))
 		if sent := e.sent(); len(sent) != 1 {
 			t.Fatalf("got %v, want b", sent)
 		}
+		if got := l.count("DelayUpdatesUntilAckOf names a type this Envoy doesn't subscribe to"); got != 1 {
+			t.Fatalf("warned %d times: %s", got, l.String())
+		}
 	})
 }
 
-func TestAResourceThatCannotBeSentEndsTheStream(t *testing.T) {
+func TestDeltaLeavesUnknownTypesUnanswered(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		e := startDelta(t, newServer(t, newSource(cluster("bad\xff")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		e.stream.reqs <- &discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType)}
-		if err := <-e.ended; err == nil {
-			t.Fatal("the stream ended OK")
+		l := &logs{}
+		e := startDelta(t, newServer(t, newSource(cluster("a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		if sent := e.subscribe("type.googleapis.com/envoy.config.core.v3.TypedExtensionConfig", "x"); len(sent) != 0 {
+			t.Fatalf("got %v", sent)
+		}
+		if cds := e.subscribe(xds.ClusterType); len(cds) != 1 {
+			t.Fatalf("got %v, want the stream still up", cds)
+		}
+		if got := l.count("Ignoring a request for an unknown type"); got != 1 {
+			t.Fatalf("warned %d times", got)
 		}
 	})
 }

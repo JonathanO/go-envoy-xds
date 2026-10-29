@@ -1,9 +1,23 @@
 package xds
 
 import (
+	"maps"
+	"math/rand/v2"
 	"slices"
 	"testing"
 )
+
+// seed gives a fuzzer request sequences enough to explore every subscription change without fuzzing.
+func seed(f *testing.F) {
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 2000 {
+		reqs := make([]byte, r.IntN(12))
+		for i := range reqs {
+			reqs[i] = byte(r.IntN(16))
+		}
+		f.Add(reqs)
+	}
+}
 
 // names decodes a fuzzer's byte as a subset of a few names, the wildcard among them.
 func namesOf(b byte) []string {
@@ -46,7 +60,7 @@ func checkAdded(t *testing.T, before, after set, added func(string) bool, change
 }
 
 func FuzzSotwSubs(f *testing.F) {
-	f.Add([]byte{0b0011, 0b0001, 0, 0b1000, 0b1001, 0})
+	seed(f)
 	f.Fuzz(func(t *testing.T, reqs []byte) {
 		for _, wild := range []bool{false, true} {
 			var s sotwSubs = &sotwNames{}
@@ -54,7 +68,8 @@ func FuzzSotwSubs(f *testing.F) {
 				s = &sotwWildcard{}
 			}
 			sentNames := false
-			for _, b := range reqs {
+			var last []string
+			for i, b := range reqs {
 				ns := namesOf(b)
 				if !wild {
 					ns = withoutWildcard(ns)
@@ -63,6 +78,13 @@ func FuzzSotwSubs(f *testing.F) {
 				added, changed := s.update(ns)
 				after := subscribedTo(s)
 				checkAdded(t, before, after, added, changed)
+				if !maps.Equal(before, after) && !changed {
+					t.Fatalf("%v changed subscriptions from %v to %v, unchanged", ns, before, after)
+				}
+				if i > 0 && slices.Equal(ns, last) && changed {
+					t.Fatalf("repeating %v changed something", ns) // as every ACK does
+				}
+				last = ns
 				// A SotW request lists everything it's subscribed to.
 				all := wild && (slices.Contains(ns, wildcard) || (len(ns) == 0 && !sentNames))
 				sentNames = sentNames || len(ns) > 0
@@ -77,7 +99,7 @@ func FuzzSotwSubs(f *testing.F) {
 }
 
 func FuzzDeltaSubs(f *testing.F) {
-	f.Add([]byte{0, 0, 0b1001, 0b0010, 0b1000, 0b0001})
+	seed(f)
 	f.Fuzz(func(t *testing.T, reqs []byte) {
 		for _, wild := range []bool{false, true} {
 			var s deltaSubs = &deltaNames{}
@@ -97,6 +119,19 @@ func FuzzDeltaSubs(f *testing.F) {
 				}
 				after := subscribedTo(s)
 				checkAdded(t, before, after, added, changed)
+				if s.subscribed(wildcard) || added != nil && added(wildcard) {
+					t.Fatal("the wildcard is a resource")
+				}
+				for _, n := range resources {
+					if added != nil && added(n) && before.has(n) && !slices.Contains(sub, n) && !slices.Contains(unsub, n) {
+						t.Fatalf("%s is in the answer, but this request didn't name it, and it was already subscribed to", n)
+					}
+				}
+				for _, n := range withoutWildcard(sub) {
+					if added == nil || !added(n) {
+						t.Fatalf("subscribed to %s, but it's not in the answer", n) // even if it already was, by wildcard
+					}
+				}
 				// The spec's model: names subscribed to explicitly, and the wildcard, which a first request naming
 				// nothing also means.
 				for _, n := range withoutWildcard(sub) {
@@ -125,7 +160,18 @@ func FuzzDeltaSubs(f *testing.F) {
 }
 
 func TestDeltaSubscribingToAndUnsubscribingFromOneNameIsAnError(t *testing.T) {
-	if _, _, err := (&deltaNames{}).update([]string{"a"}, []string{"a"}); err == nil {
-		t.Fatal("got no error")
+	for _, s := range []deltaSubs{&deltaNames{}, &deltaWildcard{}} {
+		if added, changed, err := s.update([]string{"a"}, []string{"a"}); err == nil || added != nil || changed {
+			t.Fatalf("%T: got %v, %v, want an error", s, added != nil, changed)
+		}
+	}
+}
+
+func TestOnlyListenersClustersScopedRoutesAndVirtualHostsAreWildcard(t *testing.T) {
+	for _, typ := range addOrder {
+		want := typ == ListenerType || typ == ClusterType || typ == ScopedRouteType || typ == VirtualHostType
+		if typ.Wildcard() != want {
+			t.Errorf("%s: wildcard is %v", typ, !want)
+		}
 	}
 }

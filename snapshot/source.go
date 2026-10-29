@@ -100,48 +100,25 @@ func (s *Source[D, G, V]) Update(edit func(c *Change[G, V])) map[V]*Update {
 // apply publishes one phase, and returns the update to each view it changed.
 func (s *Source[D, G, V]) apply(p *phase[G, V]) map[V]*Update {
 	changedViews := map[V]struct{}{}
-	for name, next := range p.views {
-		old := s.views[name]
-		if slices.Equal(old, next) {
-			continue
+	for name, groups := range p.views {
+		if !slices.Equal(s.views[name], groups) {
+			s.setView(name, groups)
+			changedViews[name] = struct{}{}
 		}
-		for _, g := range old {
-			delete(s.viewsByGroup[g], name)
-			if len(s.viewsByGroup[g]) == 0 {
-				delete(s.viewsByGroup, g)
-			}
-		}
-		for _, g := range next {
-			if s.viewsByGroup[g] == nil {
-				s.viewsByGroup[g] = map[V]struct{}{}
-			}
-			s.viewsByGroup[g][name] = struct{}{}
-		}
-		if len(next) == 0 {
-			delete(s.views, name)
-		} else {
-			s.views[name] = next
-		}
-		changedViews[name] = struct{}{}
 	}
 	touchedByView := map[V][]map[xds.TypeURL]names{}
 	for name, g := range p.groups {
-		byType := p.touched[name]
-		touched := false
-		for _, ns := range byType {
-			touched = touched || len(ns) > 0
-		}
+		byType, touched := p.touched[name] // only if a name was
 		switch {
 		case g == nil:
 			delete(s.groups, name)
 		case touched:
 			s.groups[name] = g
 		}
-		if !touched {
-			continue
-		}
-		for v := range s.viewsByGroup[name] {
-			touchedByView[v] = append(touchedByView[v], byType)
+		if touched {
+			for v := range s.viewsByGroup[name] {
+				touchedByView[v] = append(touchedByView[v], byType)
+			}
 		}
 	}
 	for v := range changedViews {
@@ -169,6 +146,26 @@ func (s *Source[D, G, V]) apply(p *phase[G, V]) map[V]*Update {
 		updates[v] = u
 	}
 	return updates
+}
+
+func (s *Source[D, G, V]) setView(name V, groups []G) {
+	for _, g := range s.views[name] {
+		delete(s.viewsByGroup[g], name)
+		if len(s.viewsByGroup[g]) == 0 {
+			delete(s.viewsByGroup, g)
+		}
+	}
+	for _, g := range groups {
+		if s.viewsByGroup[g] == nil {
+			s.viewsByGroup[g] = map[V]struct{}{}
+		}
+		s.viewsByGroup[g][name] = struct{}{}
+	}
+	if len(groups) == 0 {
+		delete(s.views, name)
+	} else {
+		s.views[name] = groups
+	}
 }
 
 func (s *Source[D, G, V]) stateOf(view V) *viewState {
@@ -256,21 +253,18 @@ func (c *Change[G, V]) last() *phase[G, V] { return c.phases[len(c.phases)-1] }
 //
 // Only Envoys whose view changes in a later phase wait. An Envoy connecting meanwhile gets the end result.
 func (c *Change[G, V]) Then() {
-	if p := c.last(); len(p.groups) > 0 || len(p.views) > 0 {
-		c.phases = append(c.phases, newPhase[G, V]())
-	}
+	c.phases = append(c.phases, newPhase[G, V]()) // an empty one changes no view, so costs nothing
 }
 
 // EditGroup edits a group, creating it if there's none. Only the names edit touches are compared.
 func (c *Change[G, V]) EditGroup(name G, edit func(e *Editor)) {
 	e := c.Group(name).Edit()
 	edit(e)
-	g := e.Build()
 	p := c.last()
-	for t, ns := range g.touched {
+	for t, ns := range e.touched {
 		p.touch(name, t, ns)
 	}
-	p.groups[name] = g
+	p.groups[name] = e.Build()
 }
 
 // SetGroup replaces a group with a snapshot made however you like. Every name in the old and new group is compared.

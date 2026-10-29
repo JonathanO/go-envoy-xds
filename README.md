@@ -49,6 +49,7 @@ To serve config from your own state instead, implement `xds.Source`, and an `xds
 
 ## Testing
 
-`go test ./...` runs the unit tests. The `e2e` module runs the conformance suite from
+`go test ./...` runs the unit tests. Each package's own tests kill every mutant [gomutants](https://github.com/gomutants/gomutants)
+makes of it, and CI keeps it that way: `gomutants ./...`. The `e2e` module runs the conformance suite from
 [envoy-xds-testing-go](https://github.com/JonathanO/envoy-xds-testing-go) against real Envoys, 1.36 to 1.40, over both
 protocols. It needs Docker: `cd e2e && go test ./...`, with `ENVOY_VERSIONS=1.40` to pick versions.

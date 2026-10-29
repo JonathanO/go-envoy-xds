@@ -39,12 +39,8 @@ func (r *ResyncAfterNack[D]) Nacked(c *Client[D], _ TypeURL, _ *statuspb.Status)
 	if _, ok := r.pending[c]; ok {
 		return
 	}
-	r.pending[c] = time.AfterFunc(r.next(c.Node.GetId()), func() {
-		r.mu.Lock()
-		delete(r.pending, c)
-		r.mu.Unlock()
-		c.Resync()
-	})
+	// Stays pending until the stream it ends disconnects, so its later NACKs don't resync it again.
+	r.pending[c] = time.AfterFunc(r.next(c.Node.GetId()), c.Resync)
 }
 
 // Disconnected cancels a stream's resync.
