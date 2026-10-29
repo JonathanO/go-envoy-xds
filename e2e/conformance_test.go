@@ -125,8 +125,10 @@ type idleness struct {
 	last        atomic.Int64 // UnixNano of the last event
 }
 
-// Between one push completing and the next beginning, it reads idle for an instant.
-const quiet = 100 * time.Millisecond
+// Between one push completing and the next beginning, it reads idle for an instant. A rate limited Envoy's next
+// request, e.g. a subscription to what an ACKed change named, can also come a couple of hundred milliseconds after
+// its ACK, so the quiet period is longer than that: as long as xdstest.DefaultQuietPeriod.
+const quiet = 500 * time.Millisecond
 
 func (m *idleness) touch()         { m.last.Store(time.Now().UnixNano()) }
 func (m *idleness) PushBegan()     { m.touch(); m.pushing.Store(true) }
