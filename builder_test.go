@@ -20,7 +20,9 @@ func (leaky) Type() xds.TypeURL { return xds.EndpointType }
 func (leaky) AddOrder(int, func(string) bool, string) xds.Response {
 	return xds.Response{Updates: []xds.Resource{{Name: "unasked", Message: cla("unasked", "10.0.0.9")}}}
 }
-func (leaky) RemoveOrder(int, func(string) bool, string) xds.Response { return xds.Response{Removes: []string{"unasked"}} }
+func (leaky) RemoveOrder(int, func(string) bool, string) xds.Response {
+	return xds.Response{Removes: []string{"unasked"}}
+}
 func (leaky) ResourcesAddOrder(int, func(string) bool, string) []xds.Resource {
 	return []xds.Resource{{Name: "unasked", Message: cla("unasked", "10.0.0.9")}}
 }

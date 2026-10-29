@@ -170,7 +170,9 @@ func TestUpdatesMergeAcrossChangesButNotAcrossPhases(t *testing.T) {
 
 func TestAnEnvoyWithNoViewSeesNothingUntilItsViewIsAdded(t *testing.T) {
 	s := snapshot.New[string, string, string](everyone)
-	s.Update(func(c *snapshot.Change[string, string]) { c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) }) })
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+	})
 	current, got, _ := subscribe(s, "envoy")
 	b := snapshot.Builders[string](xds.ClusterType)[0]
 	if rs := b.ResourcesRemoveOrder(current, all, ""); len(rs) != 0 {
@@ -210,7 +212,9 @@ func TestCancelledEnvoysGetNoMoreUpdates(t *testing.T) {
 	_, got, cancel := subscribe(s, "envoy")
 	_, other, _ := subscribe(s, "other")
 	cancel()
-	s.Update(func(c *snapshot.Change[string, string]) { c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) }) })
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+	})
 	if len(*got) != 0 || len(*other) != 1 {
 		t.Fatalf("cancelled got %d, other got %d", len(*got), len(*other))
 	}
@@ -221,7 +225,9 @@ func TestMergingUpdatesOutOfOrderPanics(t *testing.T) {
 	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "g") })
 	_, got, _ := subscribe(s, "envoy")
 	for range 2 {
-		s.Update(func(c *snapshot.Change[string, string]) { c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", int64(len(*got)+1))) }) })
+		s.Update(func(c *snapshot.Change[string, string]) {
+			c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", int64(len(*got)+1))) })
+		})
 	}
 	defer func() {
 		if recover() == nil {

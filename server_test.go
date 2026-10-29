@@ -13,7 +13,9 @@ import (
 )
 
 func TestNewServerRejectsIncompleteConfig(t *testing.T) {
-	configFor := func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) { return xds.EnvoyConfig[string]{}, nil }
+	configFor := func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+		return xds.EnvoyConfig[string]{}, nil
+	}
 	for name, c := range map[string]xds.ServerConfig[*snapshot.Update, string]{
 		"no source":     {ConfigFor: configFor},
 		"no ConfigFor":  {Source: newSource()},
