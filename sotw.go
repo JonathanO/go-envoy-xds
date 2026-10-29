@@ -17,8 +17,8 @@ type sotwService[U, D any] struct {
 	subs sotwSubs
 	have map[string]Resource // what Envoy has, or will have once it ACKs
 
-	nonce    string // of the last response
-	awaiting bool   // for Envoy to answer it
+	nonce    string // of the last response, which is also its version
+	awaiting bool   // for Envoy to ACK or NACK it
 }
 
 func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) error {
@@ -28,7 +28,11 @@ func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) error {
 			s.log.Debug("Ignoring a request answering an earlier response", "type", s.typ, "nonce", req.GetResponseNonce())
 			return nil
 		}
-		s.awaiting = false // an ACK, or a NACK: the manager sends no more changes after one
+		// An ACK names the version it accepts, and a NACK has error detail: the manager sends no more changes after
+		// one. Anything else answers nothing.
+		if req.GetVersionInfo() == s.nonce || req.GetErrorDetail() != nil {
+			s.awaiting = false
+		}
 	}
 	if added, changed := s.subs.update(req.GetResourceNames()); changed {
 		s.subscriptionChanged(added)

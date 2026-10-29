@@ -84,7 +84,7 @@ func (w *sotwWildcard) update(names []string) (func(string) bool, bool) {
 	case all && !was:
 		return func(string) bool { return true }, true
 	case was && !all:
-		return nil, true // the caller drops what's no longer subscribed; the rest it has
+		return added, true // the caller drops what's no longer subscribed, and answers with the rest
 	}
 	return added, changed
 }

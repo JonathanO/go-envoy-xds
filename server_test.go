@@ -457,3 +457,26 @@ func (b *broadcast) change() {
 		deliver(b.current)
 	}
 }
+
+func TestStreamErrorsAreWarnedAboutUnlessEnvoyWentAway(t *testing.T) {
+	for name, c := range map[string]struct {
+		end  func(e *deltaEnvoy)
+		warn int
+	}{
+		"closed":    {func(e *deltaEnvoy) { close(e.stream.reqs) }, 0},
+		"cancelled": {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Canceled, "gone") }, 0},
+		"context":   {func(e *deltaEnvoy) { e.stream.errs <- context.Canceled }, 0},
+		"broken":    {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Unavailable, "broken") }, 1},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			l := &logs{}
+			e := startDelta(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+			e.subscribe(xds.ClusterType)
+			c.end(e)
+			<-e.ended
+			if got := l.count("Error streaming to an ADS client"); got != c.warn {
+				t.Errorf("%s: warned %d times, want %d", name, got, c.warn)
+			}
+		})
+	}
+}

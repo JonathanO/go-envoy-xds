@@ -123,7 +123,8 @@ func serving(types ...xds.TypeURL) func(*serverConfig) {
 type fakeStream[Req, Resp any] struct {
 	grpc.ServerStream
 	ctx  context.Context
-	reqs chan *Req // closed when Envoy closes its side
+	reqs chan *Req  // closed when Envoy closes its side
+	errs chan error // what Recv fails with
 	mu   sync.Mutex
 	sent []*Resp
 	fail error // what sends return, if not nil
@@ -138,6 +139,8 @@ func (s *fakeStream[Req, Resp]) Recv() (*Req, error) {
 			return nil, io.EOF
 		}
 		return r, nil
+	case err := <-s.errs:
+		return nil, err
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
@@ -164,7 +167,7 @@ type envoy[Req, Resp any] struct {
 
 func start[Req, Resp any](t *testing.T, serve func(grpc.BidiStreamingServer[Req, Resp]) error) *envoy[Req, Resp] {
 	ctx, cancel := context.WithCancel(t.Context())
-	e := &envoy[Req, Resp]{t: t, stream: &fakeStream[Req, Resp]{ctx: ctx, reqs: make(chan *Req)}, ended: make(chan error, 1), end: cancel}
+	e := &envoy[Req, Resp]{t: t, stream: &fakeStream[Req, Resp]{ctx: ctx, reqs: make(chan *Req), errs: make(chan error)}, ended: make(chan error, 1), end: cancel}
 	go func() { e.ended <- serve(e.stream) }()
 	t.Cleanup(func() {
 		cancel()

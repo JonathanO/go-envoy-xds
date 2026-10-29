@@ -93,8 +93,9 @@ func (m *manager[R, U]) init(state U, unsubscribe func()) {
 func (m *manager[R, U]) process(req R) error {
 	t := TypeURL(req.GetTypeUrl())
 	s := m.services[t]
-	if usesClusters(t) && !s.awaitingAck() && m.clustersAwaitingAck() {
-		// Answer later, in add order. Never hold an ACK this service is waiting for.
+	if usesClusters(t) && req.GetErrorDetail() == nil && !s.awaitingAck() && m.clustersAwaitingAck() {
+		// Answer later, in add order. Never hold a NACK, which freezes the stream at once, nor an ACK this service is
+		// waiting for.
 		m.held = append(m.held, req)
 		return nil
 	}

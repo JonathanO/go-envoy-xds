@@ -294,7 +294,6 @@ func TestSotwLegacyWildcardRequestIsAnsweredWithEverything(t *testing.T) {
 }
 
 func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
-	t.Skip("differs from Java: an answer to the last response is an ACK whatever its version_info, where Java's VersionManager also wants the version it sent")
 	for _, version := range []string{"", "v-abc", "1"} { // none, another control plane's, and the one before
 		synctest.Test(t, func(t *testing.T) {
 			src := newSource(cluster("a"))
@@ -310,4 +309,15 @@ func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSotwLeavingTheWildcardIsAnswered(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), cluster("b")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.request(xds.ClusterType, cds)
+		if sent := e.request(xds.ClusterType, cds, "a"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a alone", sent)
+		}
+	})
 }

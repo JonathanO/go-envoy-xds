@@ -102,9 +102,6 @@ func FuzzSotwSubs(f *testing.F) {
 							t.Fatalf("%v newly subscribed to everything, but %s is not in the answer", ns, n)
 						}
 					}
-				case wasAll && !all && len(newly) > 0:
-					// Leaving the wildcard, the names newly listed were subscribed to already, so need no answer,
-					// though java-envoy-xds sends one.
 				default:
 					// The answer is the names newly listed, or nothing.
 					if (added == nil) != (len(newly) == 0) {
