@@ -1,0 +1,29 @@
+name: "Mutation test"
+
+on:
+  pull_request: # any base, so stacked PRs are tested too
+  push:
+    branches:
+      - main
+
+# Every mutant must be killed by its own package's tests. A pull request tests the mutants on the lines it changes;
+# main tests them all. Verdicts are cached while the code and tests they depend on are unchanged.
+jobs:
+  mutants:
+    name: "Mutation test"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # for the merge base
+      - uses: actions/cache@v6
+        with:
+          path: .gomutants-cache.json
+          key: gomutants-${{ github.sha }}
+          restore-keys: gomutants-
+      - uses: gomutants/gomutants@05a4b33ec0faacc1e36d259c4238aef860e40751 # v0.7.2
+        with:
+          version: v0.7.2
+          args: ${{ github.event_name == 'pull_request' && format('--changed-since origin/{0} ./...', github.base_ref) || './...' }}

@@ -82,26 +82,6 @@ func TestSotwUnsubscribingIsNotAnswered(t *testing.T) {
 	})
 }
 
-func TestSotwIgnoresAnswersToEarlierResponses(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		src := newSource(cluster("a"))
-		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		first := e.request(xds.ClusterType, nil)[0]
-		e.request(xds.ClusterType, first)
-		update(src, cluster("b"))
-		second := e.sent()[0]
-
-		e.request(xds.ClusterType, first) // late
-		update(src, cluster("c"))
-		if sent := e.sent(); len(sent) != 0 {
-			t.Fatalf("got %v, want nothing until Envoy answers %s", sent, second.GetNonce())
-		}
-		if sent := e.request(xds.ClusterType, second); len(sent) != 1 {
-			t.Fatalf("got %v after the ACK, want c", sent)
-		}
-	})
-}
-
 func TestSotwNackFreezesTheStreamButSubscriptionsAreStillAnswered(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
@@ -128,21 +108,184 @@ func TestSotwNackFreezesTheStreamButSubscriptionsAreStillAnswered(t *testing.T) 
 	})
 }
 
-func TestSotwSubscriptionDuringAChangeGetsItsTypesPartOfItWhichIsNotSentAgain(t *testing.T) {
+func TestSotwIgnoresAnswersToEarlierResponses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		l := &logs{}
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		first := e.request(xds.ClusterType, nil)[0]
+		e.request(xds.ClusterType, first)
+		update(src, cluster("b"))
+		second := e.sent()[0]
+
+		e.request(xds.ClusterType, first, "a") // late, from when Envoy wanted a alone
+		update(src, cluster("c"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want nothing until Envoy answers %s", sent, second.GetNonce())
+		}
+		if sent := e.request(xds.ClusterType, second); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "b", "c"}) {
+			t.Fatalf("got %v after the ACK, want every cluster", sent)
+		}
+		if got := l.count("Ignoring a request answering an earlier response"); got != 1 {
+			t.Fatalf("logged %d", got)
+		}
+	})
+}
+
+func TestSotwSubscribingToMoreKeepsWhatItHad(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cla("a", "10.0.0.1"), cla("b", "10.0.0.2")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		if sent := e.request(xds.EndpointType, eds, "a", "b"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "b"}) {
+			t.Fatalf("got %v, want a and b", sent)
+		}
+	})
+}
+
+func TestSotwSubscriptionDuringTheAddRoundGetsItsTypesAddsWhichAreNotSentAgain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
 		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
 		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		e.request(xds.EndpointType, eds, "a")
 
-		update(src, cluster("b"), cla("b", "10.0.0.2"))
+		update(src, cluster("b"), cla("a", "10.0.0.3"), cla("b", "10.0.0.2"))
 		cds := e.sent()[0]
-		eds := e.request(xds.EndpointType, nil, "a", "b")
-		if len(eds) != 1 || !slices.Equal(names(t, eds[0]), []string{"a", "b"}) {
-			t.Fatalf("got %v, want the change's endpoints too", eds)
+		sent := e.request(xds.EndpointType, eds, "a", "b")
+		if len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "b"}) || address(t, sent[0].GetResources()[0]) != "10.0.0.3" {
+			t.Fatalf("got %v, want the change's endpoints too", sent)
 		}
-		e.request(xds.EndpointType, eds[0], "a", "b")
+		e.request(xds.EndpointType, sent[0], "a", "b")
 		if sent := e.request(xds.ClusterType, cds); len(sent) != 0 {
 			t.Fatalf("got %v after the cluster ACK, want nothing more", sent)
+		}
+	})
+}
+
+func TestSotwSubscriptionDuringTheRemoveRoundGetsItsTypesRemovalsWhichAreNotSentAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), cla("c", "10.0.0.2"), route("r", "a"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+		e.request(xds.RouteType, e.request(xds.RouteType, nil, "r")[0], "r")
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		e.request(xds.EndpointType, eds, "a")
+
+		edit(src, func(e *snapshot.Editor) {
+			e.Remove(xds.RouteType, "r")
+			e.Remove(xds.EndpointType, "a")
+		})
+		rds := e.sent()[0]
+		sent := e.request(xds.EndpointType, eds, "a", "c")
+		if len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"c"}) {
+			t.Fatalf("got %v, want c, and a's endpoints gone", sent)
+		}
+		e.request(xds.EndpointType, sent[0], "a", "c")
+		if sent := e.request(xds.RouteType, rds, "r"); len(sent) != 0 {
+			t.Fatalf("got %v after the route ACK, want nothing more", sent)
+		}
+	})
+}
+
+func TestSotwNackStopsTheRestOfTheChangeInAnswersToo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		e.request(xds.EndpointType, eds, "a")
+
+		update(src, cluster("b"), cla("a", "10.0.0.2"))
+		cds := e.sent()[0]
+		e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce(),
+			VersionInfo: "1", ErrorDetail: &statuspb.Status{Message: "no"}})
+		sent := e.request(xds.EndpointType, eds, "a", "b")
+		if len(sent) != 1 || address(t, sent[0].GetResources()[0]) != "10.0.0.1" {
+			t.Fatalf("got %v, want a where it was", sent)
+		}
+	})
+}
+
+// counting counts the RemoveOrder calls of the builder it wraps.
+type counting struct {
+	xds.ConfigBuilder[*snapshot.Update, string]
+	removeOrders *int
+}
+
+func (c counting) RemoveOrder(u *snapshot.Update, subscribed func(string) bool, d string) xds.Response {
+	*c.removeOrders++
+	return c.ConfigBuilder.RemoveOrder(u, subscribed, d)
+}
+
+func TestSotwAsksForEachRoundOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cla("a", "10.0.0.1"), cla("b", "10.0.0.2"))
+		n := 0
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, func(c *serverConfig) {
+			c.Builders = []xds.ConfigBuilder[*snapshot.Update, string]{counting{snapshot.Builders[string](xds.EndpointType)[0], &n}}
+		}))
+		e.request(xds.EndpointType, e.request(xds.EndpointType, nil, "a")[0], "a")
+		update(src, cla("a", "10.0.0.3"))
+		push := e.sent()[0]
+		e.request(xds.EndpointType, push, "a")
+		e.request(xds.EndpointType, push, "a", "b")
+		if n != 1 {
+			t.Fatalf("asked for the change's removals %d times", n)
+		}
+	})
+}
+
+func TestSotwSubscriptionAfterAChangeGetsNoneOfWhatItRemoved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cla("a", "10.0.0.1"), cla("gone", "10.0.0.2"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		e.request(xds.EndpointType, eds, "a")
+		edit(src, func(e *snapshot.Editor) { e.Remove(xds.EndpointType, "gone") })
+		if sent := e.request(xds.EndpointType, eds, "a", "gone"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a alone", sent)
+		}
+	})
+}
+
+func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
+	for _, version := range []string{"", "v-abc", "1"} { // none, another control plane's, and the one before
+		synctest.Test(t, func(t *testing.T) {
+			src := newSource(cluster("a"))
+			e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+			e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+			update(src, cluster("b"))
+			push := e.sent()[0]
+
+			e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), VersionInfo: version, ResponseNonce: push.GetNonce()})
+			update(src, cluster("c"))
+			if sent := e.sent(); len(sent) != 0 {
+				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
+			}
+		})
+	}
+}
+
+func TestSotwLeavingTheWildcardIsAnswered(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), cluster("b")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.request(xds.ClusterType, cds)
+		if sent := e.request(xds.ClusterType, cds, "a"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a alone", sent)
+		}
+	})
+}
+
+func TestSotwNackIsAnAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), route("r", "a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce(),
+			ErrorDetail: &statuspb.Status{Message: "no"}})
+		if rds := e.request(xds.RouteType, nil, "r"); len(rds) != 1 {
+			t.Fatalf("got %v, want the routes no longer held for the clusters", rds)
 		}
 	})
 }

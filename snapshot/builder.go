@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"google.golang.org/protobuf/proto"
+
 	xds "github.com/JonathanO/go-envoy-xds"
 )
 
@@ -26,12 +28,11 @@ func (b builder[D]) Type() xds.TypeURL { return b.typ }
 func (b builder[D]) AddOrder(u *Update, subscribed func(string) bool, _ D) xds.Response {
 	var r xds.Response
 	for name := range u.candidates(b.typ) {
-		if !subscribed(name) {
-			continue
-		}
-		// Shared resources are one message, so most compare cheaply.
-		if after := u.after(b.typ, name); after != nil && !sameMessage(after, u.before(b.typ, name)) {
-			r.Updates = append(r.Updates, xds.Resource{Name: name, Message: after})
+		if subscribed(name) {
+			// Shared resources are one message, so most compare cheaply.
+			if after := u.after(b.typ, name); after != nil && !proto.Equal(after, u.before(b.typ, name)) {
+				r.Updates = append(r.Updates, xds.Resource{Name: name, Message: after})
+			}
 		}
 	}
 	return r

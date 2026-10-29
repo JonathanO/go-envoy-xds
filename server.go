@@ -6,6 +6,7 @@
 package xds
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 // ServerConfig configures a Server: Source and ConfigFor are required.
@@ -53,7 +53,7 @@ func NewServer[U, D any](c ServerConfig[U, D]) (*Server[U, D], error) {
 		return nil, errors.New("xds: ServerConfig needs a Source and ConfigFor")
 	}
 	s := &Server[U, D]{source: c.Source, builders: map[TypeURL]ConfigBuilder[U, D]{}, configFor: c.ConfigFor, events: c.Events,
-		metrics: c.Metrics, log: c.Logger}
+		metrics: c.Metrics, log: cmp.Or(c.Logger, slog.Default())}
 	for _, b := range c.Builders {
 		t := b.Type()
 		if !t.known() {
@@ -66,9 +66,6 @@ func NewServer[U, D any](c ServerConfig[U, D]) (*Server[U, D], error) {
 	}
 	if s.metrics == nil {
 		s.metrics = func() Metrics { return noMetrics{} }
-	}
-	if s.log == nil {
-		s.log = slog.Default()
 	}
 	return s, nil
 }
@@ -97,15 +94,15 @@ func (s *Server[U, D]) DeltaAggregatedResources(stream grpc.BidiStreamingServer[
 			if t.Wildcard() {
 				subs = &deltaWildcard{}
 			}
-			services[t] = &deltaService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs, deferred: set{},
-				deferRemovals: func() bool { return false }, answeredDuringChange: map[string]proto.Message{}}
+			services[t] = &deltaService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs,
+				answeredDuringChange: set{}}
 		}
 		return services
 	})
 }
 
 func (s *Server[U, D]) base(t TypeURL, cfg EnvoyConfig[D]) base[U, D] {
-	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: s.log}
+	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: s.log, deferred: set{}}
 }
 
 // errResync ends a stream for Client.Resync.
@@ -128,6 +125,9 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 		for {
 			req, err := stream.Recv()
 			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+					srv.log.Warn("Error streaming to an ADS client", "error", err) // not Envoy closing its side or going away
+				}
 				cancel(err)
 				return
 			}
@@ -145,15 +145,11 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 	}
 
 	var (
-		client      *Client[D]
-		m           *manager[R, U]
-		ready       <-chan struct{} // the mailbox's, once there's a manager
-		unsubscribe func()
+		client *Client[D]
+		m      *manager[R, U]
+		ready  <-chan struct{} // the mailbox's, once there's a manager
 	)
 	defer func() {
-		if unsubscribe != nil {
-			unsubscribe()
-		}
 		if m != nil {
 			m.close()
 		}
@@ -161,51 +157,51 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 			srv.events.Disconnected(client)
 		}
 	}()
-	for {
-		// A failed send cancels ctx, so check before anything else.
-		if ctx.Err() != nil {
-			return ended(ctx)
+	handle := func(req R) error {
+		if client == nil {
+			cfg, err := srv.configFor(ctx, req.GetNode())
+			if err != nil {
+				return err
+			}
+			client = &Client[D]{Node: req.GetNode(), Config: cfg, resync: func() { cancel(errResync) }}
+			if srv.events.Connected != nil {
+				srv.events.Connected(client)
+			}
 		}
+		t := TypeURL(req.GetTypeUrl())
+		if !t.known() {
+			// Leave it unanswered, like a type nobody serves: ending the stream would take every other type down with
+			// it, and Envoy would reconnect and ask again.
+			srv.log.Warn("Ignoring a request for an unknown type", "node", client.Node.GetId(), "type", t)
+			return nil
+		}
+		if detail := req.GetErrorDetail(); detail != nil {
+			srv.log.Warn("Envoy rejected config, so sending it no more changes on this stream", "node", client.Node.GetId(),
+				"type", t, "error", detail.GetMessage())
+			if srv.events.Nacked != nil {
+				srv.events.Nacked(client, t, detail)
+			}
+		}
+		if m == nil {
+			mb := newMailbox[U]()
+			m = newManager(newServices(send, func(err error) { cancel(err) }, client.Config), client.Config, mb, srv.metrics(), srv.log)
+			m.init(srv.source.Subscribe(client.Config.Details, mb.put))
+			ready = mb.ready
+		}
+		if err := m.process(req); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		return nil
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			return ended(ctx)
 		case <-ready:
 			m.updatesWaiting()
 		case req := <-requests:
-			if client == nil {
-				cfg, err := srv.configFor(ctx, req.GetNode())
-				if err != nil {
-					return err
-				}
-				client = &Client[D]{Node: req.GetNode(), Config: cfg, resync: func() { cancel(errResync) }}
-				if srv.events.Connected != nil {
-					srv.events.Connected(client)
-				}
-			}
-			t := TypeURL(req.GetTypeUrl())
-			if !t.known() {
-				// Leave it unanswered, like a type nobody serves: ending the stream would take every other type down
-				// with it, and Envoy would reconnect and ask again.
-				srv.log.Warn("Ignoring a request for an unknown type", "node", client.Node.GetId(), "type", t)
-				continue
-			}
-			if detail := req.GetErrorDetail(); detail != nil {
-				srv.log.Warn("Envoy rejected config, so sending it no more changes on this stream", "node", client.Node.GetId(),
-					"type", t, "error", detail.GetMessage())
-				if srv.events.Nacked != nil {
-					srv.events.Nacked(client, t, detail)
-				}
-			}
-			if m == nil {
-				mb := newMailbox[U]()
-				m = newManager(newServices(send, func(err error) { cancel(err) }, client.Config), client.Config, mb, srv.metrics(), srv.log)
-				state, cancelSub := srv.source.Subscribe(client.Config.Details, mb.put)
-				unsubscribe = cancelSub
-				m.init(state)
-				ready = mb.ready
-			}
-			if err := m.process(req); err != nil {
-				return status.Error(codes.InvalidArgument, err.Error())
+			if err := handle(req); err != nil {
+				return err
 			}
 		}
 	}

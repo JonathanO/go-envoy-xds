@@ -2,7 +2,9 @@ package xds_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -13,8 +15,10 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	xds "github.com/JonathanO/go-envoy-xds"
@@ -50,9 +54,11 @@ func update(src source, rs ...proto.Message) {
 
 var allTypes = []xds.TypeURL{xds.ClusterType, xds.EndpointType, xds.ListenerType, xds.RouteType}
 
-func newServer(t *testing.T, src source, cfg xds.EnvoyConfig[string], events xds.Events[string]) *xds.Server[*snapshot.Update, string] {
+type serverConfig = xds.ServerConfig[*snapshot.Update, string]
+
+func newServer(t *testing.T, src source, cfg xds.EnvoyConfig[string], events xds.Events[string], opts ...func(*serverConfig)) *xds.Server[*snapshot.Update, string] {
 	t.Helper()
-	srv, err := xds.NewServer(xds.ServerConfig[*snapshot.Update, string]{
+	c := serverConfig{
 		Source:   src,
 		Builders: snapshot.Builders[string](allTypes...),
 		ConfigFor: func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
@@ -60,27 +66,81 @@ func newServer(t *testing.T, src source, cfg xds.EnvoyConfig[string], events xds
 		},
 		Events: events,
 		Logger: slog.New(slog.DiscardHandler),
-	})
+	}
+	for _, o := range opts {
+		o(&c)
+	}
+	srv, err := xds.NewServer(c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return srv
 }
 
+// logs is what a server logs, from debug up.
+type logs struct{ strings.Builder }
+
+func (l *logs) option(c *serverConfig) {
+	c.Logger = slog.New(slog.NewTextHandler(l, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func (l *logs) count(msg string) int { return strings.Count(l.String(), msg) }
+
+// metrics records every stream's metrics, in order.
+type metrics struct{ calls []string }
+
+func (m *metrics) option(c *serverConfig) { c.Metrics = func() xds.Metrics { return m } }
+func (m *metrics) PushBegan()             { m.calls = append(m.calls, "began") }
+func (m *metrics) PushCompleted()         { m.calls = append(m.calls, "completed") }
+func (m *metrics) AwaitingAck()           { m.calls = append(m.calls, "awaiting") }
+func (m *metrics) Acked()                 { m.calls = append(m.calls, "acked") }
+func (m *metrics) Closed()                { m.calls = append(m.calls, "closed") }
+
+// watched is a Source that counts the subscriptions to it that have been cancelled.
+type watched struct {
+	xds.Source[*snapshot.Update, string]
+	cancelled int
+}
+
+func (w *watched) option(c *serverConfig) {
+	w.Source = c.Source
+	c.Source = w
+}
+
+func (w *watched) Subscribe(details string, deliver func(*snapshot.Update)) (*snapshot.Update, func()) {
+	current, cancel := w.Source.Subscribe(details, deliver)
+	return current, func() {
+		w.cancelled++
+		cancel()
+	}
+}
+
+// serving has the server build every type, not only allTypes.
+func serving(types ...xds.TypeURL) func(*serverConfig) {
+	return func(c *serverConfig) { c.Builders = snapshot.Builders[string](types...) }
+}
+
 type fakeStream[Req, Resp any] struct {
 	grpc.ServerStream
 	ctx  context.Context
-	reqs chan *Req
+	reqs chan *Req  // closed when Envoy closes its side
+	errs chan error // what Recv fails with
 	mu   sync.Mutex
 	sent []*Resp
+	fail error // what sends return, if not nil
 }
 
 func (s *fakeStream[Req, Resp]) Context() context.Context { return s.ctx }
 
 func (s *fakeStream[Req, Resp]) Recv() (*Req, error) {
 	select {
-	case r := <-s.reqs:
+	case r, ok := <-s.reqs:
+		if !ok {
+			return nil, io.EOF
+		}
 		return r, nil
+	case err := <-s.errs:
+		return nil, err
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
@@ -89,6 +149,9 @@ func (s *fakeStream[Req, Resp]) Recv() (*Req, error) {
 func (s *fakeStream[Req, Resp]) Send(r *Resp) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.fail != nil {
+		return s.fail
+	}
 	s.sent = append(s.sent, r)
 	return nil
 }
@@ -104,7 +167,7 @@ type envoy[Req, Resp any] struct {
 
 func start[Req, Resp any](t *testing.T, serve func(grpc.BidiStreamingServer[Req, Resp]) error) *envoy[Req, Resp] {
 	ctx, cancel := context.WithCancel(t.Context())
-	e := &envoy[Req, Resp]{t: t, stream: &fakeStream[Req, Resp]{ctx: ctx, reqs: make(chan *Req)}, ended: make(chan error, 1), end: cancel}
+	e := &envoy[Req, Resp]{t: t, stream: &fakeStream[Req, Resp]{ctx: ctx, reqs: make(chan *Req), errs: make(chan error)}, ended: make(chan error, 1), end: cancel}
 	go func() { e.ended <- serve(e.stream) }()
 	t.Cleanup(func() {
 		cancel()
@@ -173,6 +236,23 @@ func (e *deltaEnvoy) ack(r *discoveryv3.DeltaDiscoveryResponse) []*discoveryv3.D
 	return e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: r.GetTypeUrl(), ResponseNonce: r.GetNonce()})
 }
 
+func (e *deltaEnvoy) nack(r *discoveryv3.DeltaDiscoveryResponse) []*discoveryv3.DeltaDiscoveryResponse {
+	e.t.Helper()
+	return e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: r.GetTypeUrl(), ResponseNonce: r.GetNonce(),
+		ErrorDetail: &statuspb.Status{Message: "no"}})
+}
+
+// reconnect subscribes as a reconnecting Envoy does, saying what it kept.
+func (e *deltaEnvoy) reconnect(t xds.TypeURL, kept []string, names ...string) []*discoveryv3.DeltaDiscoveryResponse {
+	e.t.Helper()
+	versions := map[string]string{}
+	for _, n := range kept {
+		versions[n] = "1"
+	}
+	return e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(t), ResourceNamesSubscribe: names,
+		InitialResourceVersions: versions})
+}
+
 func cluster(name string) *clusterv3.Cluster {
 	return &clusterv3.Cluster{Name: name, ConnectTimeout: durationpb.New(1e9)}
 }
@@ -192,6 +272,16 @@ func route(name, cluster string) *routev3.RouteConfiguration {
 }
 
 func listener(name string) *listenerv3.Listener { return &listenerv3.Listener{Name: name} }
+
+// address returns the address of a cluster's first endpoint.
+func address(t *testing.T, a *anypb.Any) string {
+	t.Helper()
+	var c endpointv3.ClusterLoadAssignment
+	if err := a.UnmarshalTo(&c); err != nil {
+		t.Fatal(err)
+	}
+	return c.GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress().GetAddress()
+}
 
 // names returns the names a SotW response has.
 func names(t *testing.T, r *discoveryv3.DiscoveryResponse) []string {

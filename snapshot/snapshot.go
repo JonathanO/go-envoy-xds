@@ -38,7 +38,6 @@ type names = map[string]struct{}
 // change are recorded, so working out what changed costs as much as the change, not the whole config.
 type Snapshot struct {
 	resources map[xds.TypeURL]map[string]proto.Message
-	touched   map[xds.TypeURL]names // names changed from the snapshot it was edited from
 }
 
 var empty = &Snapshot{}
@@ -71,7 +70,7 @@ func (s *Snapshot) Edit() *Editor {
 type Editor struct {
 	from    *Snapshot
 	edited  map[xds.TypeURL]map[string]proto.Message
-	touched map[xds.TypeURL]names
+	touched map[xds.TypeURL]names // names changed from the snapshot it edits
 }
 
 // Put adds or replaces a resource, under the name Envoy knows it by: its name field, or cluster_name for a
@@ -83,7 +82,7 @@ func (e *Editor) Put(m proto.Message) {
 // PutNamed adds or replaces a resource, under a name you give.
 func (e *Editor) PutNamed(name string, m proto.Message) {
 	t := xds.TypeOf(m)
-	if old, ok := e.current(t)[name]; ok && sameMessage(old, m) {
+	if proto.Equal(e.current(t)[name], m) {
 		return
 	}
 	e.mutable(t)[name] = m
@@ -101,7 +100,7 @@ func (e *Editor) Remove(t xds.TypeURL, name string) {
 
 // Build returns the snapshot.
 func (e *Editor) Build() *Snapshot {
-	s := &Snapshot{resources: maps.Clone(e.from.resources), touched: e.touched}
+	s := &Snapshot{resources: maps.Clone(e.from.resources)}
 	if s.resources == nil {
 		s.resources = map[xds.TypeURL]map[string]proto.Message{}
 	}
@@ -113,7 +112,6 @@ func (e *Editor) Build() *Snapshot {
 		}
 	}
 	e.edited = map[xds.TypeURL]map[string]proto.Message{} // the snapshot owns those now
-	e.touched = map[xds.TypeURL]names{}
 	return s
 }
 
@@ -154,9 +152,4 @@ func nameOf(m proto.Message) string {
 		}
 	}
 	panic(fmt.Sprintf("snapshot: can't tell the name of a %s: use PutNamed", m.ProtoReflect().Descriptor().FullName()))
-}
-
-// sameMessage reports whether two resources are equal, cheaply when they're one message.
-func sameMessage(a, b proto.Message) bool {
-	return a == b || (a != nil && b != nil && proto.Equal(a, b))
 }

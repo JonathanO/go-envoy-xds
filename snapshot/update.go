@@ -15,7 +15,7 @@ type viewState struct {
 
 	mu sync.Mutex
 	// What the view sees of each type, merged, once something needs the whole view: an Envoy connecting, or a SotW
-	// response. Changes to a few names look through the groups instead, so never pay to build it.
+	// response. Changes to a few names look through the groups instead, so never pay to build it, nor take the lock.
 	merged map[xds.TypeURL]map[string]proto.Message
 }
 
@@ -23,12 +23,6 @@ var emptyView = &viewState{}
 
 // lookup returns what the view sees by that type and name: the first of its groups to have it.
 func (v *viewState) lookup(t xds.TypeURL, name string) proto.Message {
-	v.mu.Lock()
-	all, ok := v.merged[t]
-	v.mu.Unlock()
-	if ok {
-		return all[name]
-	}
 	for _, g := range v.groups {
 		if m, ok := g.Resource(t, name); ok {
 			return m

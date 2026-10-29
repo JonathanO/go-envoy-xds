@@ -2,8 +2,7 @@ package xds
 
 import (
 	"log/slog"
-
-	"google.golang.org/protobuf/proto"
+	"strconv"
 )
 
 // A service serves one type on one stream, SotW or delta. The manager says when to send what.
@@ -38,21 +37,25 @@ const (
 
 // base is what SotW and delta services share.
 type base[U, D any] struct {
-	typ      TypeURL
-	builder  ConfigBuilder[U, D] // nil if nothing serves this type: it never has resources
-	details  D
-	log      *slog.Logger
-	state    U
-	round    round // of the staged change
-	active   bool  // Envoy has asked for this type
-	answered bool  // we've sent Envoy something of it
+	typ     TypeURL
+	builder ConfigBuilder[U, D] // nil if nothing serves this type: it never has resources
+	details D
+	log     *slog.Logger
+	state   U
+	round   round // of the staged change
+	active  bool  // Envoy has asked for this type
+	version int   // of the last response: 0 until we've sent Envoy something of this type
+	// Stale names a reconnecting delta Envoy kept, to remove in remove order.
+	deferred set
 }
 
 func (b *base[U, D]) typeURL() TypeURL  { return b.typ }
 func (b *base[U, D]) init(state U)      { b.state = state }
 func (b *base[U, D]) served() bool      { return b.builder != nil }
-func (b *base[U, D]) hasAnswered() bool { return b.answered }
+func (b *base[U, D]) hasAnswered() bool { return b.version > 0 }
 func (b *base[U, D]) abandon()          { b.round = idle }
+
+func (b *base[U, D]) deferredRemovals() bool { return len(b.deferred) > 0 }
 
 func (b *base[U, D]) stage(change U) {
 	b.state = change
@@ -74,34 +77,40 @@ func (b *base[U, D]) resources(subscribed func(string) bool) []Resource {
 	return rs
 }
 
-// adds is the staged change's add round, ok if there's one to send. Either way, the remove round is next.
-func (b *base[U, D]) adds(subscribed func(string) bool) (r Response, ok bool) {
+// adds is the staged change's add round, if it's not been sent. Either way, the remove round is next.
+func (b *base[U, D]) adds(subscribed func(string) bool) (r Response) {
 	if b.round != adding {
-		return r, false
+		return
 	}
 	b.round = removing
 	// Not asked for this type: don't ask the builder, which might do work for nothing, or return resources Envoy
 	// would reject.
 	if !b.active || b.builder == nil {
-		return r, false
+		return
 	}
 	r = b.builder.AddOrder(b.state, subscribed, b.details)
 	b.check(r.Updates, r.Removes, subscribed)
-	return r, true
+	return r
 }
 
-// removes is the staged change's remove round, ok if there's one to send.
-func (b *base[U, D]) removes(subscribed func(string) bool) (r Response, ok bool) {
+// removes is the staged change's remove round, if it's not been sent.
+func (b *base[U, D]) removes(subscribed func(string) bool) (r Response) {
 	if b.round != removing {
-		return r, false
+		return
 	}
 	b.round = idle
 	if !b.active || b.builder == nil {
-		return r, false
+		return
 	}
 	r = b.builder.RemoveOrder(b.state, subscribed, b.details)
 	b.check(r.Updates, r.Removes, subscribed)
-	return r, true
+	return r
+}
+
+// nextVersion is the next response's version, which is also its nonce. Each type's count up from 1.
+func (b *base[U, D]) nextVersion() string {
+	b.version++
+	return strconv.Itoa(b.version)
 }
 
 func (b *base[U, D]) check(rs []Resource, removes []string, subscribed func(string) bool) {
@@ -117,9 +126,4 @@ func (b *base[U, D]) check(rs []Resource, removes []string, subscribed func(stri
 			return
 		}
 	}
-}
-
-// same reports whether two resources are equal, cheaply when they're one message.
-func same(a, b proto.Message) bool {
-	return a == b || (b != nil && proto.Equal(a, b))
 }
