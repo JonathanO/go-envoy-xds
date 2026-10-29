@@ -1,0 +1,7 @@
+go-envoy-xds
+Copyright 2022 Wise Plc.
+Copyright 2026 Jonathan Oddy.
+
+This product is a Go port of java-envoy-xds (https://github.com/JonathanO/java-envoy-xds), itself a fork of
+wise-envoy-xds (https://github.com/transferwise/wise-envoy-xds), originally developed by Wise Plc and licensed under
+the Apache License, Version 2.0.
