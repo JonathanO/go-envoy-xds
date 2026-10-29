@@ -166,6 +166,10 @@ func TestSnapshotsAndSourcesSayWhatTheyHave(t *testing.T) {
 	if got := s.View("v"); !slices.Equal(got, []string{"x", "y"}) {
 		t.Errorf("view %v", got)
 	}
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v"); c.SetView("w", "y") })
+	if v, w := s.View("v"), s.View("w"); len(v) != 0 || !slices.Equal(w, []string{"y"}) {
+		t.Errorf("views %v and %v, want none and y", v, w)
+	}
 }
 
 func TestEditorRecordsOnlyRealChanges(t *testing.T) {
@@ -246,6 +250,11 @@ func TestPutPanicsForAResourceWithNoName(t *testing.T) {
 			snapshot.Empty().Edit().Put(m)
 		}()
 	}
+	e := snapshot.Empty().Edit()
+	e.PutNamed("x", wrapperspb.String("x"))
+	if _, ok := e.Build().Resource(xds.TypeOf(wrapperspb.String("")), "x"); !ok {
+		t.Fatal("PutNamed didn't put it")
+	}
 }
 
 func TestBuildersSendAddsInTheAddRoundAndRemovalsInTheRemoveRound(t *testing.T) {
@@ -325,6 +334,13 @@ func TestAChangeHiddenByAnEarlierGroupSendsNothing(t *testing.T) {
 	if adds := b.AddOrder((*got)[0], all, ""); len(adds.Updates) != 0 {
 		t.Fatalf("sent %v, which the override hides", adds.Updates)
 	}
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("override", func(e *snapshot.Editor) { e.Remove(xds.ClusterType, "a") })
+	})
+	adds, removes := b.AddOrder((*got)[1], all, ""), b.RemoveOrder((*got)[1], all, "")
+	if len(adds.Updates) != 1 || !proto.Equal(adds.Updates[0].Message, cluster("a", 2)) || len(removes.Removes) != 0 {
+		t.Fatalf("sent %v, removed %v, want the base's a uncovered", adds.Updates, removes.Removes)
+	}
 }
 
 func TestSetGroupComparesEveryName(t *testing.T) {
@@ -336,8 +352,12 @@ func TestSetGroupComparesEveryName(t *testing.T) {
 	_, got, _ := subscribe(s, "envoy")
 	e := snapshot.Empty().Edit()
 	e.Put(cluster("a", 1))
+	e.Put(cluster("c", 1))
 	s.Update(func(c *snapshot.Change[string, string]) { c.SetGroup("g", e.Build()) })
 	b := snapshot.Builders[string](xds.ClusterType)[0]
+	if adds := b.AddOrder((*got)[0], all, ""); !slices.Equal(clusterNames(adds.Updates), []string{"c"}) {
+		t.Fatalf("sent %v, want c", clusterNames(adds.Updates))
+	}
 	if removes := b.RemoveOrder((*got)[0], all, ""); !slices.Equal(removes.Removes, []string{"b"}) {
 		t.Fatalf("removed %v, want b", removes.Removes)
 	}
@@ -439,5 +459,102 @@ func TestAViewThatDropsAGroupIsNoLongerWokenByIt(t *testing.T) {
 	})
 	if len(*keeps) != 1 || len(*drops) != 0 {
 		t.Fatalf("the view keeping it got %d updates, the one dropping it %d", len(*keeps), len(*drops))
+	}
+}
+
+func TestChangingAViewsGroupsComparesEverythingInIt(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "a")
+		c.EditGroup("a", func(e *snapshot.Editor) { e.Put(cluster("foo", 1)) })
+		c.EditGroup("b", func(e *snapshot.Editor) { e.Put(cluster("bar", 1)); e.Put(cluster("foo", 1)) })
+	})
+	_, got, _ := subscribe(s, "envoy")
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "b") })
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v") })
+	b := snapshot.Builders[string](xds.ClusterType)[0]
+	if adds, removes := b.AddOrder((*got)[0], all, ""), b.RemoveOrder((*got)[0], all, ""); !slices.Equal(clusterNames(adds.Updates), []string{"bar"}) || len(removes.Removes) != 0 {
+		t.Errorf("switching groups sent %v, removed %v, want bar alone", clusterNames(adds.Updates), removes.Removes)
+	}
+	if removes := b.RemoveOrder((*got)[1], all, "").Removes; !slices.Equal(slices.Sorted(slices.Values(removes)), []string{"bar", "foo"}) {
+		t.Errorf("removing the view removed %v", removes)
+	}
+}
+
+func TestReplacingAGroupWhereNeitherHasAnyNamesWakesNobody(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "g") })
+	e := snapshot.Empty().Edit()
+	e.Put(cluster("a", 1))
+	e.Remove(xds.ClusterType, "a")
+	if got := s.Update(func(c *snapshot.Change[string, string]) { c.SetGroup("g", e.Build()) }); len(got) != 0 {
+		t.Fatalf("woke %v", got)
+	}
+}
+
+func TestEditingAGroupTwiceInAChangeEditsOnTopOfTheFirst(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("b", 1)) })
+	})
+	if got := slices.Sorted(maps.Keys(maps.Collect(s.Group("g").Resources(xds.ClusterType)))); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("g has %v", got)
+	}
+}
+
+func TestRemovingAGroupUncoversWhatItOverrode(t *testing.T) {
+	s := snapshot.New[string, string, string](func(d string) string { return d })
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "own", "shared")
+		c.SetView("other", "theirs")
+		c.EditGroup("own", func(e *snapshot.Editor) { e.Put(cluster("foo", 30)); e.Put(cluster("mine", 1)) })
+		c.EditGroup("shared", func(e *snapshot.Editor) { e.Put(cluster("foo", 1)) })
+		c.EditGroup("theirs", func(e *snapshot.Editor) { e.Put(cluster("bar", 1)) })
+	})
+	_, got, _ := subscribe(s, "v")
+	_, other, _ := subscribe(s, "other")
+	updates := s.Update(func(c *snapshot.Change[string, string]) { c.RemoveGroup("own") })
+	b := snapshot.Builders[string](xds.ClusterType)[0]
+	adds, removes := b.AddOrder(updates["v"], all, ""), b.RemoveOrder(updates["v"], all, "")
+	if len(adds.Updates) != 1 || !proto.Equal(adds.Updates[0].Message, cluster("foo", 1)) || !slices.Equal(removes.Removes, []string{"mine"}) {
+		t.Errorf("sent %v, removed %v, want shared's foo and mine gone", adds.Updates, removes.Removes)
+	}
+	if _, ok := updates["other"]; ok || len(*got) != 1 || len(*other) != 0 {
+		t.Errorf("the view got %d updates, the other %d", len(*got), len(*other))
+	}
+}
+
+func TestUpdatesMergeAcrossVersionsAnEnvoySkipped(t *testing.T) {
+	s := snapshot.New[string, string, string](func(d string) string { return d })
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "mine"); c.SetView("other", "theirs") })
+	first := s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("mine", func(e *snapshot.Editor) { e.Put(cluster("foo", 1)) })
+	})["v"]
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("theirs", func(e *snapshot.Editor) { e.Put(cluster("bar", 1)) })
+	})
+	second := s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("mine", func(e *snapshot.Editor) { e.Put(cluster("baz", 1)) })
+	})["v"]
+	b := snapshot.Builders[string](xds.ClusterType)[0]
+	if adds := b.AddOrder(first.Merge(second), all, ""); !slices.Equal(clusterNames(adds.Updates), []string{"baz", "foo"}) {
+		t.Fatalf("sent %v", clusterNames(adds.Updates))
+	}
+}
+
+func TestAPhaseThatOnlyChangesViewsIsStillAPhase(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+	})
+	_, got, _ := subscribe(s, "envoy")
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "g")
+		c.Then()
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("b", 1)) })
+	})
+	if len(*got) != 2 || (*got)[0].MergesWithLater() || !(*got)[1].MergesWithLater() {
+		t.Fatalf("got %d updates, want the view's phase ending it", len(*got))
 	}
 }
