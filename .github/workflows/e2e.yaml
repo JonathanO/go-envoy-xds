@@ -1,0 +1,28 @@
+name: "E2E"
+
+on:
+  pull_request: # any base, so stacked PRs are tested too
+  push:
+    branches:
+      - main
+
+# The xDS conformance suite, against real Envoys: every release upstream supports.
+jobs:
+  e2e:
+    name: "E2E (Envoy ${{ matrix.envoy }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        envoy: ["1.36", "1.37", "1.38", "1.39", "1.40"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: e2e/go.mod
+      - run: go test -timeout 30m ./...
+        working-directory: e2e
+        env:
+          ENVOY_VERSIONS: ${{ matrix.envoy }}
