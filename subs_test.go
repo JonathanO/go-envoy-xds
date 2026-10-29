@@ -7,13 +7,19 @@ import (
 	"testing"
 )
 
-// seed gives a fuzzer request sequences enough to explore every subscription change without fuzzing.
-func seed(f *testing.F) {
+// seed gives a fuzzer request sequences enough to explore every subscription change without fuzzing, and examples.
+func seed(f *testing.F, examples ...[]byte) {
+	for _, reqs := range examples {
+		f.Add(reqs)
+	}
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 2000 {
 		reqs := make([]byte, r.IntN(12))
 		for i := range reqs {
 			reqs[i] = byte(r.IntN(16))
+			if r.IntN(4) == 0 {
+				reqs[i] |= byte(r.IntN(16)) << 4 // for SotW, names listed again
+			}
 		}
 		f.Add(reqs)
 	}
@@ -60,17 +66,18 @@ func checkAdded(t *testing.T, before, after set, added func(string) bool, change
 }
 
 func FuzzSotwSubs(f *testing.F) {
-	seed(f)
+	// Nothing, twice; a name, then another; the wildcard, then with a name, twice; leaving it for its name, and for
+	// nothing; a name, then nothing, twice.
+	seed(f, []byte{0, 0}, []byte{1, 2}, []byte{8, 9, 9}, []byte{9, 1}, []byte{8, 0}, []byte{1, 0, 0})
 	f.Fuzz(func(t *testing.T, reqs []byte) {
 		for _, wild := range []bool{false, true} {
 			var s sotwSubs = &sotwNames{}
 			if wild {
 				s = &sotwWildcard{}
 			}
-			sentNames := false
-			var last []string
-			for i, b := range reqs {
-				ns := namesOf(b)
+			sentNames, all, explicit := false, false, set{}
+			for _, b := range reqs {
+				ns := append(namesOf(b), namesOf(b>>4)...) // a repeated field: names may repeat
 				if !wild {
 					ns = withoutWildcard(ns)
 				}
@@ -78,16 +85,37 @@ func FuzzSotwSubs(f *testing.F) {
 				added, changed := s.update(ns)
 				after := subscribedTo(s)
 				checkAdded(t, before, after, added, changed)
-				if !maps.Equal(before, after) && !changed {
-					t.Fatalf("%v changed subscriptions from %v to %v, unchanged", ns, before, after)
-				}
-				if i > 0 && slices.Equal(ns, last) && changed {
-					t.Fatalf("repeating %v changed something", ns) // as every ACK does
-				}
-				last = ns
 				// A SotW request lists everything it's subscribed to.
-				all := wild && (slices.Contains(ns, wildcard) || (len(ns) == 0 && !sentNames))
+				wasAll, was := all, explicit
+				all = wild && (slices.Contains(ns, wildcard) || (len(ns) == 0 && !sentNames))
 				sentNames = sentNames || len(ns) > 0
+				explicit = setOf(withoutWildcard(ns))
+				if want := all != wasAll || !maps.Equal(explicit, was); changed != want {
+					t.Fatalf("%v: changed is %v", ns, changed) // every ACK repeats the last request
+				}
+				newly := maps.Clone(explicit)
+				maps.DeleteFunc(newly, func(n string, _ struct{}) bool { return was.has(n) })
+				switch {
+				case all && !wasAll:
+					for _, n := range resources {
+						if added == nil || !added(n) {
+							t.Fatalf("%v newly subscribed to everything, but %s is not in the answer", ns, n)
+						}
+					}
+				case wasAll && !all && len(newly) > 0:
+					// Leaving the wildcard, the names newly listed were subscribed to already, so need no answer,
+					// though java-envoy-xds sends one.
+				default:
+					// The answer is the names newly listed, or nothing.
+					if (added == nil) != (len(newly) == 0) {
+						t.Fatalf("%v newly listed %v, but answered %v", ns, newly, added != nil)
+					}
+					for _, n := range resources {
+						if added != nil && added(n) != newly.has(n) {
+							t.Fatalf("%v newly listed %v: %s in the answer is %v", ns, newly, n, added(n))
+						}
+					}
+				}
 				for _, n := range resources {
 					if want := all || slices.Contains(ns, n); after.has(n) != want {
 						t.Fatalf("after %v: subscribed to %s is %v", ns, n, after.has(n))
@@ -99,7 +127,10 @@ func FuzzSotwSubs(f *testing.F) {
 }
 
 func FuzzDeltaSubs(f *testing.F) {
-	seed(f)
+	// Pairs of subscribe and unsubscribe: a name, then more; names, then fewer; nothing; the wildcard alone; with a
+	// name, after another; with a name, then another, then leaving it for a third, then back.
+	seed(f, []byte{1, 0, 3, 0}, []byte{3, 0, 0, 1}, []byte{0, 0}, []byte{8, 0}, []byte{1, 0, 10, 0},
+		[]byte{9, 0, 2, 0, 4, 8, 8, 0})
 	f.Fuzz(func(t *testing.T, reqs []byte) {
 		for _, wild := range []bool{false, true} {
 			var s deltaSubs = &deltaNames{}
@@ -140,6 +171,7 @@ func FuzzDeltaSubs(f *testing.F) {
 				for _, n := range withoutWildcard(unsub) {
 					delete(explicit, n)
 				}
+				wasAll := all
 				switch {
 				case wild && first && len(sub) == 0 && len(unsub) == 0:
 					all = true
@@ -149,6 +181,10 @@ func FuzzDeltaSubs(f *testing.F) {
 					all = false
 				}
 				first = false
+				// Unsubscribing needs no answer, and an empty one would hold up pushes until Envoy ACKed it.
+				if want := len(withoutWildcard(sub)) > 0 || all && !wasAll; changed != want {
+					t.Fatalf("after +%v -%v: changed is %v", sub, unsub, changed)
+				}
 				for _, n := range resources {
 					if want := all || explicit.has(n); after.has(n) != want {
 						t.Fatalf("after +%v -%v: subscribed to %s is %v", sub, unsub, n, after.has(n))

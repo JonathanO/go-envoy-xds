@@ -248,3 +248,66 @@ func TestSotwSubscriptionAfterAChangeGetsNoneOfWhatItRemoved(t *testing.T) {
 		}
 	})
 }
+
+func TestSotwRequestIsAnsweredWithWhatItNamesAndAwaitsItsAck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cla("a", "10.0.0.1"), cla("b", "10.0.0.2"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		eds := e.request(xds.EndpointType, nil, "a")
+		if len(eds) != 1 || !slices.Equal(names(t, eds[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a alone", eds)
+		}
+
+		update(src, cla("a", "10.0.0.3"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v before Envoy ACKs", sent)
+		}
+		if sent := e.request(xds.EndpointType, eds[0], "a"); len(sent) != 1 || address(t, sent[0].GetResources()[0]) != "10.0.0.3" {
+			t.Fatalf("got %v after the ACK, want a moved", sent)
+		}
+	})
+}
+
+func TestSotwNackIsAnAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), route("r", "a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce(),
+			ErrorDetail: &statuspb.Status{Message: "no"}})
+		if rds := e.request(xds.RouteType, nil, "r"); len(rds) != 1 {
+			t.Fatalf("got %v, want the routes no longer held for the clusters", rds)
+		}
+	})
+}
+
+func TestSotwLegacyWildcardRequestIsAnsweredWithEverything(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), cluster("b")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)
+		if len(cds) != 1 || !slices.Equal(names(t, cds[0]), []string{"a", "b"}) {
+			t.Fatalf("got %v, want every cluster", cds)
+		}
+		if sent := e.request(xds.ClusterType, cds[0], "*"); len(sent) != 0 {
+			t.Fatalf("got %v, want no answer: the explicit wildcard is the same subscription", sent)
+		}
+	})
+}
+
+func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
+	t.Skip("differs from Java: an answer to the last response is an ACK whatever its version_info, where Java's VersionManager also wants the version it sent")
+	for _, version := range []string{"", "v-abc", "1"} { // none, another control plane's, and the one before
+		synctest.Test(t, func(t *testing.T) {
+			src := newSource(cluster("a"))
+			e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+			e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+			update(src, cluster("b"))
+			push := e.sent()[0]
+
+			e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), VersionInfo: version, ResponseNonce: push.GetNonce()})
+			update(src, cluster("c"))
+			if sent := e.sent(); len(sent) != 0 {
+				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
+			}
+		})
+	}
+}
