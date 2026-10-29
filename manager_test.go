@@ -247,3 +247,20 @@ func TestMetricsFollowPushesAndAcks(t *testing.T) {
 		}
 	})
 }
+
+func TestARouteNackIsNeverHeld(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), route("r", "a"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		rds := e.subscribe(xds.RouteType, "r")[0]
+		e.ack(rds)
+
+		update(src, cluster("b"), route("r", "b"))
+		cds := e.sent()[0]
+		e.nack(rds) // while the clusters await their ACK
+		if sent := e.ack(cds); len(sent) != 0 {
+			t.Fatalf("got %v after the NACK, want no more of the change", sent)
+		}
+	})
+}

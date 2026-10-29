@@ -125,6 +125,9 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 		for {
 			req, err := stream.Recv()
 			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+					srv.log.Warn("Error streaming to an ADS client", "error", err) // not Envoy closing its side or going away
+				}
 				cancel(err)
 				return
 			}

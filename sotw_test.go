@@ -248,3 +248,44 @@ func TestSotwSubscriptionAfterAChangeGetsNoneOfWhatItRemoved(t *testing.T) {
 		}
 	})
 }
+
+func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
+	for _, version := range []string{"", "v-abc", "1"} { // none, another control plane's, and the one before
+		synctest.Test(t, func(t *testing.T) {
+			src := newSource(cluster("a"))
+			e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+			e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+			update(src, cluster("b"))
+			push := e.sent()[0]
+
+			e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), VersionInfo: version, ResponseNonce: push.GetNonce()})
+			update(src, cluster("c"))
+			if sent := e.sent(); len(sent) != 0 {
+				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
+			}
+		})
+	}
+}
+
+func TestSotwLeavingTheWildcardIsAnswered(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), cluster("b")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.request(xds.ClusterType, cds)
+		if sent := e.request(xds.ClusterType, cds, "a"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a alone", sent)
+		}
+	})
+}
+
+func TestSotwNackIsAnAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := startSotw(t, newServer(t, newSource(cluster("a"), route("r", "a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.request(xds.ClusterType, nil)[0]
+		e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce(),
+			ErrorDetail: &statuspb.Status{Message: "no"}})
+		if rds := e.request(xds.RouteType, nil, "r"); len(rds) != 1 {
+			t.Fatalf("got %v, want the routes no longer held for the clusters", rds)
+		}
+	})
+}
