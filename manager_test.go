@@ -1,10 +1,15 @@
 package xds_test
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"slices"
 	"testing"
 	"testing/synctest"
+	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -191,7 +196,9 @@ func TestNackStopsTheRestOfTheChange(t *testing.T) {
 		e.ack(e.subscribe(xds.RouteType, "r")[0])
 
 		update(src, cluster("b"), route("r", "b"))
-		if sent := e.nack(e.sent()[0]); len(sent) != 0 {
+		push := e.sent()[0]
+		update(src, cluster("c")) // waits behind it
+		if sent := e.nack(push); len(sent) != 0 {
 			t.Fatalf("got %v after the NACK, want no more of the change", sent)
 		}
 		if w.cancelled != 1 {
@@ -234,7 +241,11 @@ func TestMetricsFollowPushesAndAcks(t *testing.T) {
 		e.ack(first)                                    // not the latest
 		e.ack(second)
 		update(src, cluster("b"))
-		e.ack(e.sent()[0])
+		cds := e.sent()[0]
+		if last := m.calls[len(m.calls)-1]; last != "began" {
+			t.Fatalf("%s before the push was ACKed", last)
+		}
+		e.ack(cds)
 		update(src, cluster("c"), route("r", "c"))
 		e.nack(e.sent()[0])
 		e.end()
@@ -247,6 +258,99 @@ func TestMetricsFollowPushesAndAcks(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdatesWaitForEveryAnswerToBeAcked(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		cds := e.subscribe(xds.ClusterType)[0]
+		e.ack(e.subscribe(xds.EndpointType, "a")[0])
+
+		update(src, cluster("b"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v while CDS isn't ACKed", sent)
+		}
+		if sent := e.ack(cds); len(sent) != 1 || !slices.Equal(deltaNames(sent[0]), []string{"b"}) {
+			t.Fatalf("got %v after the CDS ACK, want b", sent)
+		}
+	})
+}
+
+func TestUpdatesThatDoNotMergeGoOneAtATime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &counter{}
+		srv, err := xds.NewServer(xds.ServerConfig[int, string]{
+			Source:   src,
+			Builders: []xds.ConfigBuilder[int, string]{churning{}},
+			ConfigFor: func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+				return xds.EnvoyConfig[string]{}, nil
+			},
+			Logger: slog.New(slog.DiscardHandler),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := &deltaEnvoy{start(t, srv.DeltaAggregatedResources)}
+		e.ack(e.subscribe(xds.ClusterType)[0])
+
+		for u := range 3 {
+			src.deliver(u + 1) // 2 and 3 wait behind 1
+		}
+		var got []string
+		for sent := e.sent(); len(sent) > 0; sent = e.ack(sent[0]) {
+			if len(sent) != 1 {
+				t.Fatalf("got %v at once, want one response at a time", sent)
+			}
+			got = append(got, fmt.Sprint(deltaNames(sent[0]), sent[0].GetRemovedResources()))
+		}
+		want := []string{"[add1] []", "[] [remove1]", "[add2] []", "[] [remove2]", "[add3] []", "[] [remove3]"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("got %v,\nwant %v", got, want)
+		}
+	})
+}
+
+func TestDelayUpdatesUntilAckOfWaitsForThatTypesAckNotAnothers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType}, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+
+		update(src, cluster("b"))
+		if sent := e.ack(e.subscribe(xds.ClusterType, "a")[0]); len(sent) != 0 {
+			t.Fatalf("got %v after a CDS ACK, want b held for RDS's", sent)
+		}
+	})
+}
+
+func TestNothingStaleMeansNoWarningAboutRemovingIt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		l := &logs{}
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+
+		time.Sleep(30 * time.Second) // and RDS hasn't answered
+		update(src, cluster("b"))
+		if sent := e.sent(); len(sent) != 1 || l.Len() != 0 {
+			t.Fatalf("got %v, logged %s", sent, l.String())
+		}
+	})
+}
+
+// churning serves clusters, each update adding one and removing another.
+type churning struct{}
+
+func (churning) Type() xds.TypeURL { return xds.ClusterType }
+func (churning) AddOrder(u int, _ func(string) bool, _ string) xds.Response {
+	name := fmt.Sprint("add", u)
+	return xds.Response{Updates: []xds.Resource{{Name: name, Message: cluster(name)}}}
+}
+func (churning) RemoveOrder(u int, _ func(string) bool, _ string) xds.Response {
+	return xds.Response{Removes: []string{fmt.Sprint("remove", u)}}
+}
+func (churning) ResourcesAddOrder(int, func(string) bool, string) []xds.Resource    { return nil }
+func (churning) ResourcesRemoveOrder(int, func(string) bool, string) []xds.Resource { return nil }
 
 func TestARouteNackIsNeverHeld(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
