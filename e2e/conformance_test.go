@@ -38,7 +38,7 @@ func TestConformance(t *testing.T) {
 		images = append(images, "envoyproxy/envoy:v"+strings.TrimSpace(v)+"-latest")
 	}
 	conformance.Run(t, conformance.Options{
-		New:         func(*testing.T) conformance.ControlPlane { return newControlPlane() },
+		New:         func(t *testing.T) conformance.ControlPlane { c := newControlPlane(); c.t = t; return c },
 		EnvoyImages: images,
 		Skip:        map[string]string{"sotw/ChangesWhileDisconnected": sotwReconnect, "sotw/ControlPlaneRestarts": sotwReconnect},
 	})
@@ -46,6 +46,7 @@ func TestConformance(t *testing.T) {
 
 // controlPlane serves every Envoy one view of two groups, so real Envoys check that a view merges its groups.
 type controlPlane struct {
+	t   *testing.T
 	src *snapshot.Source[string, string, string]
 
 	mu      sync.Mutex
@@ -87,7 +88,7 @@ func (c *controlPlane) Register(s *grpc.Server) {
 	if err != nil {
 		panic(err)
 	}
-	discoveryv3.RegisterAggregatedDiscoveryServiceServer(s, srv)
+	discoveryv3.RegisterAggregatedDiscoveryServiceServer(s, &logged{srv, c.t})
 }
 
 func (c *controlPlane) SetConfig(resources []proto.Message) {
@@ -137,4 +138,37 @@ func (m *idleness) Closed()        { m.PushCompleted() }
 
 func (m *idleness) idle() bool {
 	return !m.pushing.Load() && m.outstanding.Load() == 0 && time.Since(time.Unix(0, m.last.Load())) >= quiet
+}
+
+type logged struct {
+	*xds.Server[*snapshot.Update, string]
+	t *testing.T
+}
+
+func (l *logged) DeltaAggregatedResources(s grpc.BidiStreamingServer[discoveryv3.DeltaDiscoveryRequest, discoveryv3.DeltaDiscoveryResponse]) error {
+	return l.Server.DeltaAggregatedResources(&loggedStream{s, l.t})
+}
+
+type loggedStream struct {
+	grpc.BidiStreamingServer[discoveryv3.DeltaDiscoveryRequest, discoveryv3.DeltaDiscoveryResponse]
+	t *testing.T
+}
+
+func short(t string) string { return t[strings.LastIndex(t, ".")+1:] }
+
+func (s *loggedStream) Recv() (*discoveryv3.DeltaDiscoveryRequest, error) {
+	r, err := s.BidiStreamingServer.Recv()
+	if err == nil {
+		s.t.Logf("%s REQ %s nonce=%q +%v -%v kept=%v err=%v", time.Now().Format("15:04:05.000"), short(r.GetTypeUrl()), r.GetResponseNonce(), r.GetResourceNamesSubscribe(), r.GetResourceNamesUnsubscribe(), r.GetInitialResourceVersions(), r.GetErrorDetail() != nil)
+	}
+	return r, err
+}
+
+func (s *loggedStream) Send(r *discoveryv3.DeltaDiscoveryResponse) error {
+	var ns []string
+	for _, x := range r.GetResources() {
+		ns = append(ns, x.GetName())
+	}
+	s.t.Logf("%s RESP %s nonce=%q %v removed=%v", time.Now().Format("15:04:05.000"), short(r.GetTypeUrl()), r.GetNonce(), ns, r.GetRemovedResources())
+	return s.BidiStreamingServer.Send(r)
 }
