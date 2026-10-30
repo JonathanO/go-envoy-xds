@@ -521,6 +521,30 @@ func TestChangingAViewsGroupsComparesEverythingInIt(t *testing.T) {
 	}
 }
 
+func TestAGroupCreatedOrRemovedWithItsViewChangeReachesTheViewsEnvoys(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "a")
+		c.EditGroup("a", func(e *snapshot.Editor) { e.Put(cluster("foo", 1)) })
+	})
+	_, got, _ := subscribe(s, "envoy")
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("new", func(e *snapshot.Editor) { e.Put(cluster("bar", 1)) })
+		c.SetView("v", "a", "new")
+	})
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.RemoveGroup("new")
+		c.SetView("v", "a")
+	})
+	b := snapshot.Builders[string](xds.ClusterType)[0]
+	if adds, removes := b.AddOrder((*got)[0], all, ""), b.RemoveOrder((*got)[0], all, ""); !slices.Equal(clusterNames(adds.Updates), []string{"bar"}) || len(removes.Removes) != 0 {
+		t.Errorf("creating the group sent %v, removed %v, want bar alone", clusterNames(adds.Updates), removes.Removes)
+	}
+	if adds, removes := b.AddOrder((*got)[1], all, ""), b.RemoveOrder((*got)[1], all, ""); len(adds.Updates) != 0 || !slices.Equal(removes.Removes, []string{"bar"}) {
+		t.Errorf("removing the group sent %v, removed %v, want bar removed alone", clusterNames(adds.Updates), removes.Removes)
+	}
+}
+
 func TestReplacingAGroupWhereNeitherHasAnyNamesWakesNobody(t *testing.T) {
 	s := snapshot.New[string, string, string](everyone)
 	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "g") })
