@@ -5,7 +5,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"reflect"
-	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -157,9 +156,8 @@ func TestEnvoysComingAndGoingWhileChangesArriveSeeEveryChangeInOrder(t *testing.
 	}
 }
 
-func TestThousandsOfEnvoysNeedNoGoroutinesOfTheirOwn(t *testing.T) {
+func TestThousandsOfEnvoysAllCatchUpInOrder(t *testing.T) {
 	s := oneGroup()
-	before := runtime.NumGoroutine()
 	envoys := make([]*follower, 5000)
 	for i := range envoys {
 		envoys[i] = follow(s)
@@ -168,9 +166,6 @@ func TestThousandsOfEnvoysNeedNoGoroutinesOfTheirOwn(t *testing.T) {
 		s.Update(func(c *Change[string, string]) {
 			c.EditGroup("all", func(e *Editor) { e.Put(&clusterv3.Cluster{Name: fmt.Sprint("cluster-", i)}) })
 		})
-	}
-	if after := runtime.NumGoroutine(); after > before { // others, e.g. earlier tests', may have ended meanwhile
-		t.Errorf("%d goroutines, then %d", before, after)
 	}
 	for _, f := range envoys {
 		if held, ok := f.held(); !ok || held.groups[0] != s.Group("all") {

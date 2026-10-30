@@ -81,7 +81,9 @@ type fake[Req, Resp any] struct {
 	reqs chan *Req // closed when Envoy closes its side
 	mu   sync.Mutex
 	sent []*Resp
-	read int // responses already returned by received
+	read int           // responses already returned by received
+	done chan struct{} // closed when the server ends the stream
+	err  error         // what it ended it with
 }
 
 func (f *fake[Req, Resp]) Context() context.Context { return f.ctx }
@@ -108,13 +110,26 @@ func (f *fake[Req, Resp]) Send(r *Resp) error {
 // connect starts a stream in the test's bubble, which ends with the test.
 func connect[Req, Resp any](t *testing.T, serve func(grpc.BidiStreamingServer[Req, Resp]) error) *fake[Req, Resp] {
 	ctx, cancel := context.WithCancel(t.Context())
-	f := &fake[Req, Resp]{ctx: ctx, reqs: make(chan *Req)}
-	go serve(f)
+	f := &fake[Req, Resp]{ctx: ctx, reqs: make(chan *Req), done: make(chan struct{})}
+	go func() {
+		defer close(f.done)
+		f.err = serve(f)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		synctest.Wait()
 	})
 	return f
+}
+
+// check fails the test if the server has ended the stream. Until the test ends, only Envoy may.
+func (f *fake[Req, Resp]) check(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.done:
+		t.Fatalf("the server ended the stream: %v", f.err)
+	default:
+	}
 }
 
 // send sends a request, and returns the responses to it.
@@ -180,6 +195,7 @@ func (s *sotwStream) send(req *discoveryv3.DiscoveryRequest) {
 func (s *sotwStream) deliver() {
 	s.src.deliverAll()
 	s.responses = append(s.responses, s.received()...)
+	s.check(s.t)
 }
 
 func (s *sotwStream) last() *discoveryv3.DiscoveryResponse { return s.responses[len(s.responses)-1] }

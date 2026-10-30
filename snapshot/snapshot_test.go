@@ -56,17 +56,29 @@ func TestPutNamesEndpointsByCluster(t *testing.T) {
 func TestChangingAGroupWakesOnlyTheViewsWithIt(t *testing.T) {
 	s := snapshot.New[string, string, string](func(d string) string { return d })
 	s.Update(func(c *snapshot.Change[string, string]) {
-		c.SetView("x", "shared", "x-only")
-		c.SetView("y", "shared")
+		c.SetView("a", "own-a", "shared")
+		c.SetView("b", "own-b")
 	})
-	_, x, _ := subscribe(s, "x")
-	_, y, _ := subscribe(s, "y")
+	var woken []string
+	for _, v := range []string{"a", "b"} {
+		s.Subscribe(v, func(*snapshot.Update) { woken = append(woken, v) })
+	}
+	put := func(group, name string) map[string]*snapshot.Update {
+		return s.Update(func(c *snapshot.Change[string, string]) {
+			c.EditGroup(group, func(e *snapshot.Editor) { e.Put(cluster(name, 1)) })
+		})
+	}
 
-	s.Update(func(c *snapshot.Change[string, string]) {
-		c.EditGroup("x-only", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
-	})
-	if len(*x) != 1 || len(*y) != 0 {
-		t.Fatalf("x got %d, y got %d updates, want 1 and 0", len(*x), len(*y))
+	put("shared", "foo")
+	put("own-b", "foo")
+	if got := put("nobody", "foo"); len(got) != 0 {
+		t.Errorf("a group in no view woke %v", got)
+	}
+	put("shared", "foo") // no change
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("a", "own-a") })
+	put("shared", "bar")
+	if !slices.Equal(woken, []string{"a", "b", "a"}) {
+		t.Fatalf("woke %v, want a, b, then a for leaving shared", woken)
 	}
 }
 
@@ -162,13 +174,18 @@ func TestSnapshotsAndSourcesSayWhatTheyHave(t *testing.T) {
 		t.Errorf("types %v", got)
 	}
 	s := snapshot.New[string, string, string](everyone)
-	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "x", "y") })
-	if got := s.View("v"); !slices.Equal(got, []string{"x", "y"}) {
+	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("a", "g", "h"); c.SetView("b", "g") })
+	if got := s.View("a"); !slices.Equal(got, []string{"g", "h"}) {
 		t.Errorf("view %v", got)
 	}
-	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v"); c.SetView("w", "y") })
-	if v, w := s.View("v"), s.View("w"); len(v) != 0 || !slices.Equal(w, []string{"y"}) {
-		t.Errorf("views %v and %v, want none and y", v, w)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("a")
+		c.RemoveGroup("g")
+		c.SetGroup("h", snapshot.Empty())
+		c.SetView("b", "h")
+	})
+	if a, b := s.View("a"), s.View("b"); len(a) != 0 || !slices.Equal(b, []string{"h"}) {
+		t.Errorf("views %v and %v, want none and h", a, b)
 	}
 }
 
@@ -213,6 +230,9 @@ func TestEditorsEditWhatTheyHaveEditedSoFar(t *testing.T) {
 	if _, ok := first.Resource(xds.ClusterType, "c"); ok {
 		t.Errorf("editing after Build changed the snapshot built")
 	}
+	if got := slices.Sorted(maps.Keys(maps.Collect(e.Build().Resources(xds.ClusterType)))); !slices.Equal(got, []string{"a", "c"}) {
+		t.Errorf("built %v after Build, want a kept and c added", got)
+	}
 }
 
 func TestSnapshotsHaveNoTypesTheyHaveNoneOf(t *testing.T) {
@@ -229,11 +249,11 @@ func TestSnapshotsHaveNoTypesTheyHaveNoneOf(t *testing.T) {
 func TestPutPanicsForAResourceWithNoName(t *testing.T) {
 	// Messages with a name field that isn't one string.
 	f, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
-		Name: proto.String("names.proto"), Package: proto.String("test"), Syntax: proto.String("proto3"),
+		Name: new("names.proto"), Package: new("test"), Syntax: new("proto3"),
 		MessageType: []*descriptorpb.DescriptorProto{
-			{Name: proto.String("Numbered"), Field: []*descriptorpb.FieldDescriptorProto{{Name: proto.String("name"), JsonName: proto.String("name"),
+			{Name: new("Numbered"), Field: []*descriptorpb.FieldDescriptorProto{{Name: new("name"), JsonName: new("name"),
 				Number: proto.Int32(1), Type: descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum()}}},
-			{Name: proto.String("Listed"), Field: []*descriptorpb.FieldDescriptorProto{{Name: proto.String("name"), JsonName: proto.String("name"),
+			{Name: new("Listed"), Field: []*descriptorpb.FieldDescriptorProto{{Name: new("name"), JsonName: new("name"),
 				Number: proto.Int32(1), Type: descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()}}},
 		},
 	}, nil)
@@ -265,6 +285,7 @@ func TestBuildersSendAddsInTheAddRoundAndRemovalsInTheRemoveRound(t *testing.T) 
 			e.Put(cluster("old", 1))
 			e.Put(cluster("same", 1))
 			e.Put(cluster("changed", 1))
+			e.Put(routes("r"))
 		})
 	})
 	_, got, _ := subscribe(s, "envoy")
@@ -294,12 +315,27 @@ func TestBuildersSendAddsInTheAddRoundAndRemovalsInTheRemoveRound(t *testing.T) 
 		t.Errorf("after: %v", clusterNames(end))
 	}
 	// Only what Envoy's subscribed to.
-	none := func(string) bool { return false }
-	if adds, removes := b.AddOrder(u, none, ""), b.RemoveOrder(u, none, ""); len(adds.Updates) != 0 || len(removes.Removes) != 0 {
-		t.Errorf("sent %v, removed %v, which Envoy isn't subscribed to", adds.Updates, removes.Removes)
+	some := func(name string) bool { return name == "new" || name == "same" }
+	if adds, removes := b.AddOrder(u, some, ""), b.RemoveOrder(u, some, ""); !slices.Equal(clusterNames(adds.Updates), []string{"new"}) || len(removes.Removes) != 0 {
+		t.Errorf("sent %v, removed %v, want new alone", clusterNames(adds.Updates), removes.Removes)
 	}
-	if mid := b.ResourcesAddOrder(u, none, ""); len(mid) != 0 {
-		t.Errorf("mid-change: %v, which Envoy isn't subscribed to", clusterNames(mid))
+	if mid, end := b.ResourcesAddOrder(u, some, ""), b.ResourcesRemoveOrder(u, some, ""); !slices.Equal(clusterNames(mid), []string{"new", "same"}) || !slices.Equal(clusterNames(end), []string{"new", "same"}) {
+		t.Errorf("mid-change %v, after %v, want new and same", clusterNames(mid), clusterNames(end))
+	}
+
+	// Each type's builder sends its own, and what's added together all goes in the add round.
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.EditGroup("g", func(e *snapshot.Editor) {
+			e.Put(cluster("foo", 1))
+			e.Put(cla("foo", "10.0.0.1"))
+			e.Put(routes("r", "foo"))
+		})
+	})
+	for i, b := range snapshot.Builders[string](xds.ClusterType, xds.EndpointType, xds.RouteType) {
+		adds, removes := b.AddOrder((*got)[1], all, ""), b.RemoveOrder((*got)[1], all, "")
+		if want := []string{"foo", "foo", "r"}[i]; !slices.Equal(clusterNames(adds.Updates), []string{want}) || len(removes.Removes) != 0 {
+			t.Errorf("%s: sent %v, removed %v, want %s alone", b.Type(), clusterNames(adds.Updates), removes.Removes, want)
+		}
 	}
 }
 
@@ -379,31 +415,35 @@ func TestAGroupRemovedAndEditedInOneChangeStartsEmpty(t *testing.T) {
 
 func TestUpdatesMergeAcrossChangesButNotAcrossPhases(t *testing.T) {
 	s := snapshot.New[string, string, string](func(d string) string { return d })
-	s.Update(func(c *snapshot.Change[string, string]) { c.SetView("v", "g"); c.SetView("other", "o") })
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "routes", "clusters")
+		c.SetView("other", "routes")
+	})
 	_, got, _ := subscribe(s, "v")
 	_, other, _ := subscribe(s, "other")
 
 	whole := s.Update(func(c *snapshot.Change[string, string]) {
-		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
-		c.EditGroup("o", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+		c.EditGroup("routes", func(e *snapshot.Editor) { e.Put(routes("r")) })
 		c.Then()
 		c.Then() // an empty phase changes nothing
-		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(cluster("b", 1)) })
+		c.EditGroup("clusters", func(e *snapshot.Editor) { e.Put(cluster("a", 1)) })
+		c.Then()
+		c.EditGroup("clusters", func(e *snapshot.Editor) { e.Put(cluster("b", 1)) })
 	})
-	if len(*got) != 2 || (*got)[0].MergesWithLater() || !(*got)[1].MergesWithLater() {
-		t.Fatalf("got %d updates, want the first phase's ending it", len(*got))
+	if len(*got) != 3 || (*got)[0].MergesWithLater() || (*got)[1].MergesWithLater() || !(*got)[2].MergesWithLater() {
+		t.Fatalf("got %d updates, want each phase's but the last's ending it", len(*got))
 	}
 	if len(*other) != 1 || !(*other)[0].MergesWithLater() {
 		t.Fatalf("a view in the first phase alone got %d updates, want one that merges", len(*other))
 	}
-	if g := s.Group("g"); !slices.Equal(slices.Sorted(maps.Keys(maps.Collect(g.Resources(xds.ClusterType)))), []string{"a", "b"}) {
+	if g := s.Group("clusters"); !slices.Equal(slices.Sorted(maps.Keys(maps.Collect(g.Resources(xds.ClusterType)))), []string{"a", "b"}) {
 		t.Errorf("a later phase didn't edit on top of the earlier one")
 	}
 	b := snapshot.Builders[string](xds.ClusterType)[0]
-	if adds := b.AddOrder(whole["v"], all, ""); !slices.Equal(clusterNames(adds.Updates), []string{"a", "b"}) {
-		t.Errorf("the caller's update has %v, want every phase", clusterNames(adds.Updates))
+	if adds := b.AddOrder(whole["v"], all, ""); !whole["v"].MergesWithLater() || !slices.Equal(clusterNames(adds.Updates), []string{"a", "b"}) {
+		t.Errorf("the caller's update has %v, want every phase, merging", clusterNames(adds.Updates))
 	}
-	if merged := (*got)[0].Merge((*got)[1]); !slices.Equal(clusterNames(b.AddOrder(merged, all, "").Updates), []string{"a", "b"}) {
+	if merged := (*got)[0].Merge((*got)[1]).Merge((*got)[2]); !slices.Equal(clusterNames(b.AddOrder(merged, all, "").Updates), []string{"a", "b"}) {
 		t.Errorf("merged updates lost a change")
 	}
 }

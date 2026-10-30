@@ -33,8 +33,8 @@ import (
 
 func FuzzEnvoysOnlyServeFromConfigTheyHold(f *testing.F) {
 	r := rand.New(rand.NewPCG(1, 2))
-	for range 200 {
-		choices := make([]byte, r.IntN(200))
+	for range 1000 { // about 50 steps each, as many as the Java original's
+		choices := make([]byte, r.IntN(500))
 		for i := range choices {
 			choices[i] = byte(r.Uint32())
 		}
@@ -453,6 +453,11 @@ func (e *model) problem(after received, format string, args ...any) {
 
 func (e *model) check() {
 	e.t.Helper()
+	if e.delta != nil {
+		e.delta.check(e.t)
+	} else {
+		e.sotw.check(e.t)
+	}
 	if len(e.problems) > 0 {
 		e.t.Fatal(e.problems)
 	}

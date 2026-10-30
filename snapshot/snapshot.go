@@ -70,7 +70,7 @@ func (s *Snapshot) Edit() *Editor {
 type Editor struct {
 	from    *Snapshot
 	edited  map[xds.TypeURL]map[string]proto.Message
-	touched map[xds.TypeURL]names // names changed from the snapshot it edits
+	touched map[xds.TypeURL]names // names changed since Edit
 }
 
 // Put adds or replaces a resource, under the name Envoy knows it by: its name field, or cluster_name for a
@@ -98,7 +98,7 @@ func (e *Editor) Remove(t xds.TypeURL, name string) {
 	e.touch(t, name)
 }
 
-// Build returns the snapshot.
+// Build returns the snapshot. Edits after it carry on from it, and don't change it.
 func (e *Editor) Build() *Snapshot {
 	s := &Snapshot{resources: maps.Clone(e.from.resources)}
 	if s.resources == nil {
@@ -111,7 +111,7 @@ func (e *Editor) Build() *Snapshot {
 			s.resources[t] = rs
 		}
 	}
-	e.edited = map[xds.TypeURL]map[string]proto.Message{} // the snapshot owns those now
+	e.from, e.edited = s, map[xds.TypeURL]map[string]proto.Message{} // the snapshot owns those now
 	return s
 }
 
