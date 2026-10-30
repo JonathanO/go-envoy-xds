@@ -30,8 +30,13 @@ func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) error {
 		}
 		// An ACK names the version it accepts, and a NACK has error detail: the manager sends no more changes after
 		// one. Anything else answers nothing.
-		if req.GetVersionInfo() == s.nonce || req.GetErrorDetail() != nil {
+		switch v := req.GetVersionInfo(); {
+		case v == s.nonce || req.GetErrorDetail() != nil:
 			s.awaiting = false
+		case v == "":
+			s.log.Error("Envoy rejected a version and has none to roll back to", "type", s.typ, "version", s.nonce)
+		default:
+			s.log.Error("Envoy rejected a version and rolled back", "type", s.typ, "version", s.nonce, "to", v)
 		}
 	}
 	if added, changed := s.subs.update(req.GetResourceNames()); changed {

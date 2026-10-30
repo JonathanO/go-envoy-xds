@@ -33,7 +33,7 @@ func (r Response) empty() bool { return len(r.Updates) == 0 && len(r.Removes) ==
 // subscribed to: Envoy rejects resources it didn't ask for.
 //
 // A Server calls a ConfigBuilder from each Envoy's stream, so from many goroutines at once, and never with two calls
-// for one stream at the same time.
+// for one stream at the same time. A panic in one is logged, and ends that Envoy's stream with an error.
 type ConfigBuilder[U, D any] interface {
 	// Type is the type of resource it builds.
 	Type() TypeURL

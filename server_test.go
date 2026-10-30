@@ -96,20 +96,98 @@ func TestTheSourceIsSubscribedToWithTheEnvoysDetails(t *testing.T) {
 
 func TestAnErrorFromConfigForEndsTheStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		denied := errors.New("denied")
-		srv, err := xds.NewServer(xds.ServerConfig[*snapshot.Update, string]{
-			Source: newSource(),
-			ConfigFor: func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+		denied, l := errors.New("denied"), &logs{}
+		e := startSotw(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option, func(c *serverConfig) {
+			c.ConfigFor = func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
 				return xds.EnvoyConfig[string]{}, denied
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		e := startSotw(t, srv)
+			}
+		}))
 		e.stream.reqs <- nil
 		if err := <-e.ended; !errors.Is(err, denied) {
 			t.Fatalf("got %v", err)
+		}
+		if got := l.count(`level=WARN msg="Error streaming to an ADS client" error=denied`); got != 1 {
+			t.Fatalf("logged %q", l.String())
+		}
+	})
+}
+
+func TestAResyncIsLogged(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var client *xds.Client[string]
+		l := &logs{}
+		e := startSotw(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{
+			Connected: func(c *xds.Client[string]) { client = c },
+		}, l.option))
+		e.request(xds.ClusterType, nil)
+		client.Resync()
+		<-e.ended
+		if got := l.count(`level=INFO msg="Closing stream so it resyncs" node=envoy`); got != 1 {
+			t.Fatalf("logged %q", l.String())
+		}
+	})
+}
+
+// Asking a missing builder would panic, which now only ends the stream, so check it stays up.
+func TestATypeNobodyServesSurvivesAChange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, serving(xds.ClusterType)))
+		e.request(xds.EndpointType, e.request(xds.EndpointType, nil, "a")[0], "a")
+		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+		update(src, cluster("b"))
+		e.request(xds.ClusterType, e.sent()[0]) // on to the remove round
+		select {
+		case err := <-e.ended:
+			t.Fatalf("the stream ended with %v", err)
+		default:
+		}
+	})
+}
+
+// panicking panics when building a change for the Envoy whose details are "bad".
+type panicking struct {
+	xds.ConfigBuilder[*snapshot.Update, string]
+}
+
+func (p panicking) AddOrder(u *snapshot.Update, subscribed func(string) bool, d string) xds.Response {
+	if d == "bad" {
+		panic("broken builder")
+	}
+	return p.ConfigBuilder.AddOrder(u, subscribed, d)
+}
+
+func TestAPanickingBuilderEndsOnlyItsStream(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src, w, l := newSource(cluster("a")), &watched{}, &logs{}
+		var disconnected []string
+		srv := newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{
+			Disconnected: func(c *xds.Client[string]) { disconnected = append(disconnected, c.Node.GetId()) },
+		}, w.option, l.option, func(c *serverConfig) {
+			c.Builders = []xds.ConfigBuilder[*snapshot.Update, string]{panicking{snapshot.Builders[string](xds.ClusterType)[0]}}
+			c.ConfigFor = func(_ context.Context, n *corev3.Node) (xds.EnvoyConfig[string], error) {
+				return xds.EnvoyConfig[string]{Details: n.GetId()}, nil
+			}
+		})
+		bad := startSotw(t, srv)
+		badNode := &corev3.Node{Id: "bad"}
+		cds := bad.send(&discoveryv3.DiscoveryRequest{Node: badNode, TypeUrl: string(xds.ClusterType)})[0]
+		bad.send(&discoveryv3.DiscoveryRequest{Node: badNode, TypeUrl: string(xds.ClusterType), VersionInfo: cds.GetVersionInfo(), ResponseNonce: cds.GetNonce()})
+		good := startSotw(t, srv)
+		good.request(xds.ClusterType, good.request(xds.ClusterType, nil)[0])
+
+		update(src, cluster("b"))
+		if err := <-bad.ended; status.Code(err) != codes.Internal {
+			t.Fatalf("the bad stream ended with %v", err)
+		}
+		if w.cancelled != 1 || !slices.Equal(disconnected, []string{"bad"}) {
+			t.Fatalf("unsubscribed %d times, disconnected %v", w.cancelled, disconnected)
+		}
+		if got := l.count(`level=ERROR msg="Panicked serving an Envoy, so closing its stream" node=bad panic="broken builder"`); got != 1 {
+			t.Fatalf("logged %q", l.String())
+		}
+		if sent := good.sent(); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "b"}) {
+			t.Fatalf("got %v on the other stream, want the change", sent)
 		}
 	})
 }
@@ -467,6 +545,10 @@ func TestStreamErrorsAreWarnedAboutUnlessEnvoyWentAway(t *testing.T) {
 		"cancelled": {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Canceled, "gone") }, 0},
 		"context":   {func(e *deltaEnvoy) { e.stream.errs <- context.Canceled }, 0},
 		"broken":    {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Unavailable, "broken") }, 1},
+		"invalid": {func(e *deltaEnvoy) {
+			e.stream.reqs <- &discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType),
+				ResourceNamesSubscribe: []string{"a"}, ResourceNamesUnsubscribe: []string{"a"}}
+		}, 1},
 	} {
 		synctest.Test(t, func(t *testing.T) {
 			l := &logs{}

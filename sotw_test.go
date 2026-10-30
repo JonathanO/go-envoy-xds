@@ -1,6 +1,7 @@
 package xds_test
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"testing/synctest"
@@ -296,8 +297,8 @@ func TestSotwLegacyWildcardRequestIsAnsweredWithEverything(t *testing.T) {
 func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
 	for _, version := range []string{"", "v-abc", "1"} { // none, another control plane's, and the one before
 		synctest.Test(t, func(t *testing.T) {
-			src := newSource(cluster("a"))
-			e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+			src, l := newSource(cluster("a")), &logs{}
+			e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
 			e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
 			update(src, cluster("b"))
 			push := e.sent()[0]
@@ -307,8 +308,40 @@ func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
 			if sent := e.sent(); len(sent) != 0 {
 				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
 			}
+			logged := fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and rolled back" type=%s version=%s to=%s`, xds.ClusterType, push.GetVersionInfo(), version)
+			if version == "" {
+				logged = fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and has none to roll back to" type=%s version=%s`, xds.ClusterType, push.GetVersionInfo())
+			}
+			if got := l.count(logged); got != 1 {
+				t.Fatalf("answered with version %q: logged %q", version, l.String())
+			}
 		})
 	}
+}
+
+// Envoy answering with another version rejects the push, and ACKing the next one accepts it.
+func TestSotwAckAfterAnAnswerWithAnotherVersionLetsChangesGo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cla("a", "10.0.0.1"), cla("b", "10.0.0.2"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		first := e.request(xds.EndpointType, nil, "a")[0]
+		reject := func(names ...string) []*discoveryv3.DiscoveryResponse {
+			return e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.EndpointType), ResponseNonce: first.GetNonce(), ResourceNames: names})
+		}
+
+		reject("a")
+		update(src, cla("a", "10.0.0.3"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want the change held: Envoy didn't accept %s", sent, first.GetVersionInfo())
+		}
+		second := reject("a", "b")
+		if len(second) != 1 || !slices.Equal(names(t, second[0]), []string{"a", "b"}) || second[0].GetVersionInfo() == first.GetVersionInfo() {
+			t.Fatalf("got %v, want a and b pushed again in another version", second)
+		}
+		if sent := e.request(xds.EndpointType, second[0], "a", "b"); len(sent) != 1 || address(t, sent[0].GetResources()[0]) != "10.0.0.3" {
+			t.Fatalf("got %v after the ACK, want a moved", sent)
+		}
+	})
 }
 
 func TestSotwLeavingTheWildcardIsAnswered(t *testing.T) {
