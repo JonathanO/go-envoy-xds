@@ -91,14 +91,38 @@ func (m *manager[R, U]) init(state U, unsubscribe func()) {
 
 // process handles a request for a type we know.
 func (m *manager[R, U]) process(req R) error {
-	t := TypeURL(req.GetTypeUrl())
-	s := m.services[t]
-	if usesClusters(t) && req.GetErrorDetail() == nil && !s.awaitingAck() && m.clustersAwaitingAck() {
-		// Answer later, in add order. Never hold a NACK, which freezes the stream at once, nor an ACK this service is
-		// waiting for.
+	if m.mustWait(req) {
+		if req.GetErrorDetail() != nil {
+			m.freeze() // at once, though what it asks for waits its turn
+		}
 		m.held = append(m.held, req)
 		return nil
 	}
+	if err := m.handle(req); err != nil {
+		return err
+	}
+	for len(m.held) > 0 && !m.clustersAwaitingAck() {
+		req := m.held[0]
+		m.held = m.held[1:]
+		if err := m.handle(req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mustWait reports whether to answer a request later, in add order: see usesClusters. It never overtakes a held request
+// of its type, as each follows on from the last. Otherwise a NACK never waits, nor an ACK its service is waiting for.
+func (m *manager[R, U]) mustWait(req R) bool {
+	t := TypeURL(req.GetTypeUrl())
+	if slices.ContainsFunc(m.held, func(h R) bool { return TypeURL(h.GetTypeUrl()) == t }) {
+		return true
+	}
+	return usesClusters(t) && req.GetErrorDetail() == nil && !m.services[t].awaitingAck() && m.clustersAwaitingAck()
+}
+
+func (m *manager[R, U]) handle(req R) error {
+	s := m.services[TypeURL(req.GetTypeUrl())]
 	if err := s.process(req); err != nil {
 		return err
 	}
@@ -110,13 +134,6 @@ func (m *manager[R, U]) process(req R) error {
 		m.continuePush() // it may be the ACK the push waits for
 	} else {
 		m.pushAllowedWork()
-	}
-	for len(m.held) > 0 && !m.clustersAwaitingAck() {
-		req := m.held[0]
-		m.held = m.held[1:]
-		if err := m.process(req); err != nil {
-			return err
-		}
 	}
 	return nil
 }
