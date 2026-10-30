@@ -17,9 +17,10 @@ type request interface {
 	GetErrorDetail() *statuspb.Status
 }
 
-// usesClusters are the types that refer to clusters. Envoy re-subscribes to everything at once when it reconnects, so
-// their answers wait until the clusters and endpoints they may use are ACKed. CDS and EDS answers never wait: Envoy
-// holds its CDS ACK until new clusters have warmed, which takes the EDS answer.
+// usesClusters are the types that refer to clusters. Envoy re-subscribes to everything at once when it reconnects, and
+// may subscribe at any point in a change, so their answers wait until the clusters and endpoints they may use have
+// been sent and ACKed. CDS and EDS answers never wait: Envoy holds its CDS ACK until new clusters have warmed, which
+// takes the EDS answer.
 func usesClusters(t TypeURL) bool {
 	switch t {
 	case ListenerType, RouteType, ScopedRouteType, VirtualHostType:
@@ -101,7 +102,7 @@ func (m *manager[R, U]) process(req R) error {
 	if err := m.handle(req); err != nil {
 		return err
 	}
-	for len(m.held) > 0 && !m.clustersAwaitingAck() {
+	for len(m.held) > 0 && !m.clustersPending() {
 		req := m.held[0]
 		m.held = m.held[1:]
 		if err := m.handle(req); err != nil {
@@ -118,7 +119,7 @@ func (m *manager[R, U]) mustWait(req R) bool {
 	if slices.ContainsFunc(m.held, func(h R) bool { return TypeURL(h.GetTypeUrl()) == t }) {
 		return true
 	}
-	return usesClusters(t) && !m.services[t].awaitingAck() && m.clustersAwaitingAck()
+	return usesClusters(t) && !m.services[t].awaitingAck() && m.clustersPending()
 }
 
 func (m *manager[R, U]) handle(req R) error {
@@ -151,8 +152,11 @@ func (m *manager[R, U]) close() {
 	m.metrics.Closed()
 }
 
-func (m *manager[R, U]) clustersAwaitingAck() bool {
-	return m.services[ClusterType].awaitingAck() || m.services[EndpointType].awaitingAck()
+// clustersPending reports whether clusters or endpoints are still to be sent or ACKed: a change's, or an answer's. The
+// endpoints' add round comes after the clusters', so while either is to come, the endpoints' is.
+func (m *manager[R, U]) clustersPending() bool {
+	c, e := m.services[ClusterType], m.services[EndpointType]
+	return c.awaitingAck() || e.awaitingAck() || e.addsToCome()
 }
 
 // mayRemove reports whether stale resources of this type, kept by a reconnecting Envoy, may be removed now: every type
@@ -199,9 +203,10 @@ func (m *manager[R, U]) updateOutstanding(s service[R, U]) {
 // A rejected change won't fix itself: resending it, or any later change that includes it, gets rejected again. Envoy
 // may also have applied part of it, so we no longer know what it has, and diffing from what we think it has would make
 // things worse. Dropping the stream instead would have Envoy reconnect straight away, be sent the same config, and
-// loop. Subscription requests are still answered, from our own state. For SotW that includes what Envoy rejected, as
-// each answer is the whole set: resending it changes nothing Envoy has, where rolling it back would undo any part of
-// it Envoy took.
+// loop. Subscription requests are still answered, from our own state: the rejected change's add round, as its removals
+// were never sent and Envoy may still use what they'd remove. For SotW that includes what Envoy rejected, as each
+// answer is the whole set: resending it changes nothing Envoy has, where rolling it back would undo any part of it
+// Envoy took.
 func (m *manager[R, U]) freeze() {
 	m.frozen = true
 	m.unsubscribe()

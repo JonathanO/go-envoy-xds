@@ -88,11 +88,11 @@ func TestAnErrorFromConfigForEndsTheStream(t *testing.T) {
 				return xds.EnvoyConfig[string]{}, denied
 			}
 		}))
-		e.stream.reqs <- nil
+		e.stream.reqs <- &discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType)}
 		if err := <-e.ended; !errors.Is(err, denied) {
 			t.Fatalf("got %v", err)
 		}
-		if got := l.count(`level=WARN msg="Error streaming to an ADS client" error=denied`); got != 1 {
+		if got := l.count(`level=WARN msg="Error streaming to an ADS client" node=envoy error=denied`); got != 1 {
 			t.Fatalf("logged %q", l.String())
 		}
 	})

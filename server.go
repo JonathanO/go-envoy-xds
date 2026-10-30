@@ -68,14 +68,14 @@ func NewServer[U, D any](c ServerConfig[U, D]) (*Server[U, D], error) {
 
 // StreamAggregatedResources serves a SotW stream.
 func (s *Server[U, D]) StreamAggregatedResources(stream grpc.BidiStreamingServer[discoveryv3.DiscoveryRequest, discoveryv3.DiscoveryResponse]) error {
-	return serve(s, stream, func(send func(*discoveryv3.DiscoveryResponse), fail func(error), cfg EnvoyConfig[D]) map[TypeURL]service[*discoveryv3.DiscoveryRequest, U] {
+	return serve(s, stream, func(send func(*discoveryv3.DiscoveryResponse), fail func(error), cfg EnvoyConfig[D], log *slog.Logger) map[TypeURL]service[*discoveryv3.DiscoveryRequest, U] {
 		services := map[TypeURL]service[*discoveryv3.DiscoveryRequest, U]{}
 		for _, t := range addOrder {
 			var subs sotwSubs = &sotwNames{}
 			if t.Wildcard() {
 				subs = &sotwWildcard{}
 			}
-			services[t] = &sotwService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs, have: map[string]Resource{}}
+			services[t] = &sotwService[U, D]{base: s.base(t, cfg, log), send: send, fail: fail, subs: subs, have: map[string]Resource{}}
 		}
 		return services
 	})
@@ -83,14 +83,14 @@ func (s *Server[U, D]) StreamAggregatedResources(stream grpc.BidiStreamingServer
 
 // DeltaAggregatedResources serves a delta stream.
 func (s *Server[U, D]) DeltaAggregatedResources(stream grpc.BidiStreamingServer[discoveryv3.DeltaDiscoveryRequest, discoveryv3.DeltaDiscoveryResponse]) error {
-	return serve(s, stream, func(send func(*discoveryv3.DeltaDiscoveryResponse), fail func(error), cfg EnvoyConfig[D]) map[TypeURL]service[*discoveryv3.DeltaDiscoveryRequest, U] {
+	return serve(s, stream, func(send func(*discoveryv3.DeltaDiscoveryResponse), fail func(error), cfg EnvoyConfig[D], log *slog.Logger) map[TypeURL]service[*discoveryv3.DeltaDiscoveryRequest, U] {
 		services := map[TypeURL]service[*discoveryv3.DeltaDiscoveryRequest, U]{}
 		for _, t := range addOrder {
 			var subs deltaSubs = &deltaNames{}
 			if t.Wildcard() {
 				subs = &deltaWildcard{}
 			}
-			svc := &deltaService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs,
+			svc := &deltaService[U, D]{base: s.base(t, cfg, log), send: send, fail: fail, subs: subs,
 				answeredDuringChange: set{}}
 			svc.deferred = set{} // only delta has stale names to defer
 			services[t] = svc
@@ -99,8 +99,8 @@ func (s *Server[U, D]) DeltaAggregatedResources(stream grpc.BidiStreamingServer[
 	})
 }
 
-func (s *Server[U, D]) base(t TypeURL, cfg EnvoyConfig[D]) base[U, D] {
-	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: s.log}
+func (s *Server[U, D]) base(t TypeURL, cfg EnvoyConfig[D], log *slog.Logger) base[U, D] {
+	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: log}
 }
 
 // errResync ends a stream for Client.Resync.
@@ -114,7 +114,7 @@ type adsStream[R request, S any] interface {
 
 // serve runs one stream. Its goroutine owns the stream's state, so the only locking is in the mailbox.
 func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S],
-	newServices func(send func(S), fail func(error), cfg EnvoyConfig[D]) map[TypeURL]service[R, U]) (err error) {
+	newServices func(send func(S), fail func(error), cfg EnvoyConfig[D], log *slog.Logger) map[TypeURL]service[R, U]) (err error) {
 	ctx, cancel := context.WithCancelCause(stream.Context())
 	defer cancel(nil)
 
@@ -122,15 +122,12 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 		client *Client[D]
 		m      *manager[R, U]
 		ready  <-chan struct{} // the mailbox's, once there's a manager
+		log    = srv.log       // with the node, once there's a client
 	)
 	// A panic, from a builder say, ends this stream alone, after the cleanup below.
 	defer func() {
 		if p := recover(); p != nil {
-			var id string
-			if client != nil {
-				id = client.Node.GetId()
-			}
-			srv.log.Error("Panicked serving an Envoy, so closing its stream", "node", id, "panic", p)
+			log.Error("Panicked serving an Envoy, so closing its stream", "panic", p)
 			err = status.Error(codes.Internal, "xds: internal error")
 		}
 	}()
@@ -166,6 +163,7 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 	}()
 	handle := func(req R) error {
 		if client == nil {
+			log = srv.log.With("node", req.GetNode().GetId()) // before ConfigFor, so its failure says which Envoy
 			cfg, err := srv.configFor(ctx, req.GetNode())
 			if err != nil {
 				return err
@@ -179,19 +177,19 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 		if !t.known() {
 			// Leave it unanswered, like a type nobody serves: ending the stream would take every other type down with
 			// it, and Envoy would reconnect and ask again.
-			srv.log.Warn("Ignoring a request for an unknown type", "node", client.Node.GetId(), "type", t)
+			log.Warn("Ignoring a request for an unknown type", "type", t)
 			return nil
 		}
 		if detail := req.GetErrorDetail(); detail != nil {
-			srv.log.Warn("Envoy rejected config, so sending it no more changes on this stream", "node", client.Node.GetId(),
-				"type", t, "error", detail.GetMessage())
+			log.Warn("Envoy rejected config, so sending it no more changes on this stream", "type", t,
+				"error", detail.GetMessage())
 			if srv.events.Nacked != nil {
 				srv.events.Nacked(client, t, detail)
 			}
 		}
 		if m == nil {
 			mb := newMailbox[U]()
-			m = newManager(newServices(send, func(err error) { cancel(err) }, client.Config), client.Config, mb, srv.metrics(), srv.log)
+			m = newManager(newServices(send, func(err error) { cancel(err) }, client.Config, log), client.Config, mb, srv.metrics(), log)
 			m.init(srv.source.Subscribe(client.Config.Details, mb.put))
 			ready = mb.ready
 		}
@@ -203,27 +201,27 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 	for {
 		select {
 		case <-ctx.Done():
-			return srv.ended(client, context.Cause(ctx))
+			return ended(log, context.Cause(ctx))
 		case <-ready:
 			m.updatesWaiting()
 		case req := <-requests:
 			if err := handle(req); err != nil {
-				return srv.ended(client, err)
+				return ended(log, err)
 			}
 		}
 	}
 }
 
 // ended is what serve returns when the stream ends with err.
-func (s *Server[U, D]) ended(c *Client[D], err error) error {
+func ended(log *slog.Logger, err error) error {
 	switch {
 	case errors.Is(err, errResync):
-		s.log.Info("Closing stream so it resyncs", "node", c.Node.GetId())
+		log.Info("Closing stream so it resyncs")
 		return nil // Envoy reconnects
 	case errors.Is(err, io.EOF):
 		return nil
 	case !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled: // not Envoy going away
-		s.log.Warn("Error streaming to an ADS client", "error", err)
+		log.Warn("Error streaming to an ADS client", "error", err)
 	}
 	return err
 }

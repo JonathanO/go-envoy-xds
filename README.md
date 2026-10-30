@@ -40,6 +40,8 @@ discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works, for changing it.
 - [pkg.go.dev](https://pkg.go.dev/github.com/JonathanO/go-envoy-xds): the API, with runnable examples.
 
+[examples](examples) has a toy control plane each way, to run against a real Envoy.
+
 ## How it serves Envoy
 
 - **Make before break.** Each change goes in two rounds, adds then removes, a type at a time, waiting for Envoy's ACK
@@ -47,6 +49,7 @@ discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 - **Bursts merge.** Updates that arrive while an Envoy is busy merge into one, if they're `xds.Merger`s, as
   snapshot's are.
 - **Phases.** `Change.Then` orders changes make before break can't see.
+- **Subscribing mid-change.** An Envoy that subscribes while a change goes out gets nothing ahead of the change's order.
 - **A NACK freezes the stream.** The Envoy keeps its last good config until you resync it.
 
 [ARCHITECTURE.md](docs/ARCHITECTURE.md) has the details.

@@ -56,13 +56,9 @@ func (s *sotwService[U, D]) subscriptionChanged(added func(string) bool) {
 	for _, r := range s.resources(added) {
 		s.have[r.Name] = r
 	}
-	// Mid-change, the answer has the change so far, so its round needn't be sent again.
-	switch s.round {
-	case adding:
-		s.apply(s.adds(s.subs.subscribed))
-	case removing:
-		s.apply(s.removes(s.subs.subscribed))
-	}
+	// If its type's add round is still to come, the answer has it, so it needn't be sent again. The remove round still
+	// goes in turn.
+	s.apply(s.adds(s.subs.subscribed))
 	// Answer even if nothing changed: Envoy waits for an answer to its first request of each type, e.g. CDS when
 	// there are no clusters yet, and to hear that names it asked for don't exist.
 	s.push()

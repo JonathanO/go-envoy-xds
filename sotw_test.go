@@ -164,7 +164,7 @@ func TestSotwSubscriptionDuringTheAddRoundGetsItsTypesAddsWhichAreNotSentAgain(t
 	})
 }
 
-func TestSotwSubscriptionDuringTheRemoveRoundGetsItsTypesRemovalsWhichAreNotSentAgain(t *testing.T) {
+func TestSotwSubscriptionBeforeItsTypesRemoveRoundKeepsWhatTheRoundRemoves(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"), cla("a", "10.0.0.1"), cla("c", "10.0.0.2"), route("r", "a"))
 		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
@@ -179,12 +179,48 @@ func TestSotwSubscriptionDuringTheRemoveRoundGetsItsTypesRemovalsWhichAreNotSent
 		})
 		rds := e.sent()[0]
 		sent := e.request(xds.EndpointType, eds, "a", "c")
-		if len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"c"}) {
-			t.Fatalf("got %v, want c, and a's endpoints gone", sent)
+		if len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "c"}) {
+			t.Fatalf("got %v, want a's endpoints kept while the route using them is still there", sent)
 		}
 		e.request(xds.EndpointType, sent[0], "a", "c")
-		if sent := e.request(xds.RouteType, rds, "r"); len(sent) != 0 {
-			t.Fatalf("got %v after the route ACK, want nothing more", sent)
+		if sent := e.request(xds.RouteType, rds, "r"); len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"c"}) {
+			t.Fatalf("got %v after the route ACK, want a's endpoints removed in turn", sent)
+		}
+	})
+}
+
+func TestSotwFirstRequestForAWildcardTypeKeepsWhatItsRemoveRoundRemoves(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), listener("l1"), route("r", "a"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.request(xds.ListenerType, e.request(xds.ListenerType, nil)[0])
+		e.request(xds.RouteType, e.request(xds.RouteType, nil, "r")[0], "r")
+
+		edit(src, func(e *snapshot.Editor) {
+			e.Put(listener("l2"))
+			e.Remove(xds.ListenerType, "l1")
+			e.Remove(xds.RouteType, "r")
+			e.Remove(xds.ClusterType, "a")
+		})
+		lds := e.sent()[0]
+		// A reconnected Envoy, which kept cluster a, asks for clusters only now. l1 still routes to a: its removal
+		// hasn't been sent.
+		cds := e.request(xds.ClusterType, nil)
+		if len(cds) != 1 || !slices.Equal(names(t, cds[0]), []string{"a"}) {
+			t.Fatalf("got %v, want a: an answer without it removes it", cds)
+		}
+		e.request(xds.ClusterType, cds[0])
+		removal := e.request(xds.ListenerType, lds)
+		if !slices.Equal(types(removal), []xds.TypeURL{xds.ListenerType}) || !slices.Equal(names(t, removal[0]), []string{"l2"}) {
+			t.Fatalf("got %v after l2's ACK, want l1 removed", removal)
+		}
+		removal = e.request(xds.ListenerType, removal[0])
+		if !slices.Equal(types(removal), []xds.TypeURL{xds.RouteType}) {
+			t.Fatalf("got %v after l1's removal is ACKed, want r removed", removal)
+		}
+		removal = e.request(xds.RouteType, removal[0], "r")
+		if !slices.Equal(types(removal), []xds.TypeURL{xds.ClusterType}) || len(removal[0].GetResources()) != 0 {
+			t.Fatalf("got %v after r's removal is ACKed, want a removed", removal)
 		}
 	})
 }
@@ -204,6 +240,32 @@ func TestSotwNackStopsTheRestOfTheChangeInAnswersToo(t *testing.T) {
 		sent := e.request(xds.EndpointType, eds, "a", "b")
 		if len(sent) != 1 || address(t, sent[0].GetResources()[0]) != "10.0.0.1" {
 			t.Fatalf("got %v, want a where it was", sent)
+		}
+	})
+}
+
+func TestSotwSubscriptionAfterANackKeepsWhatTheRejectedChangeRemoves(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), cla("b", "10.0.0.2"))
+		e := startSotw(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.request(xds.ClusterType, e.request(xds.ClusterType, nil)[0])
+		eds := e.request(xds.EndpointType, nil, "a")[0]
+		e.request(xds.EndpointType, eds, "a")
+
+		edit(src, func(e *snapshot.Editor) {
+			e.Put(cluster("c"))
+			e.Remove(xds.EndpointType, "b")
+		})
+		cds := e.sent()[0]
+		e.send(&discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce(),
+			VersionInfo: "1", ErrorDetail: &statuspb.Status{Message: "no"}})
+		// The removal of b's endpoints never went out, so whatever uses them may still be there.
+		sent := e.request(xds.EndpointType, eds, "a", "b")
+		if len(sent) != 1 || !slices.Equal(names(t, sent[0]), []string{"a", "b"}) {
+			t.Fatalf("got %v, want b's endpoints", sent)
+		}
+		if sent := e.request(xds.EndpointType, sent[0], "a", "b"); len(sent) != 0 {
+			t.Fatalf("got %v, want no more of the change", sent)
 		}
 	})
 }
@@ -308,9 +370,9 @@ func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
 			if sent := e.sent(); len(sent) != 0 {
 				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
 			}
-			logged := fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and rolled back" type=%s version=%s to=%s`, xds.ClusterType, push.GetVersionInfo(), version)
+			logged := fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and rolled back" node=envoy type=%s version=%s to=%s`, xds.ClusterType, push.GetVersionInfo(), version)
 			if version == "" {
-				logged = fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and has none to roll back to" type=%s version=%s`, xds.ClusterType, push.GetVersionInfo())
+				logged = fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and has none to roll back to" node=envoy type=%s version=%s`, xds.ClusterType, push.GetVersionInfo())
 			}
 			if got := l.count(logged); got != 1 {
 				t.Fatalf("answered with version %q: logged %q", version, l.String())

@@ -201,15 +201,15 @@ and ACKed, alone, before anything after it. In package snapshot, `Change.Then` e
 When a request subscribes to names, the service answers at once, whatever the push is doing. The answer comes from
 the service's state: the staged change, if there is one.
 
-- If the type's add round hasn't been sent, the names newly subscribed to are answered from `ResourcesAddOrder`: the
-  change's adds, and what it's yet to remove. Envoy is sent the change mid-way, which is consistent with the rest of
-  what it has.
+- Until the type's remove round has been sent, the names newly subscribed to are answered from `ResourcesAddOrder`:
+  the change's adds, and what it's yet to remove. Envoy is sent the change mid-way, which is consistent with the rest
+  of what it has, and nothing goes before what may still refer to it.
 - Otherwise they're answered from `ResourcesRemoveOrder`: everything once the change is done, or as things stand if
   no change is under way.
 
-So that the push doesn't send it again, the SotW service then sends the type's pending round in the same answer, and
-the round is marked sent. The delta service instead records the names it answered with during the add round, in
-`answeredDuringChange`, and drops them from the add round when it comes.
+So that the push doesn't send it again, the SotW service sends the type's add round in the same answer, if it's still
+to come, and marks it sent. The remove round always goes in its turn. The delta service instead records the names it
+answered with during the add round, in `answeredDuringChange`, and drops them from the add round when it comes.
 
 Every subscription is answered, even with nothing: Envoy waits for an answer to its first request of each type, and
 to hear that names it asked for don't exist. Delta says so in `removed_resources`; SotW leaves them out. Unsubscribing
@@ -222,8 +222,9 @@ manager's `outstanding` set. No push starts until that's empty.
 
 Listeners, routes, scoped routes and virtual hosts refer to clusters (`usesClusters` in manager.go). When Envoy
 reconnects, it subscribes to everything at once. If a route subscription were answered while the clusters it uses
-were still awaiting an ACK, the route could arrive first. So while clusters or endpoints await an ACK, `mustWait`
-holds a request of those types in `held`, and `process` answers held requests, in order, once neither does.
+were still to be sent, or awaiting an ACK, the route could arrive first. So while clusters or endpoints await an ACK,
+or a change's endpoints are still to be sent (`clustersPending`), `mustWait` holds a request of those types in `held`,
+and `process` answers held requests, in order, once that's over.
 
 Exceptions:
 
@@ -262,8 +263,9 @@ includes it, is rejected again. Envoy may have applied part of it, so we no long
 from a guess makes things worse. Dropping the stream would have Envoy reconnect straight away, get the same config,
 and loop.
 
-A frozen stream still answers subscriptions, from its own state, which is the rejected change's. For SotW that
-includes what was rejected, as each answer is the whole set. Resending it changes nothing Envoy has, where rolling it
+A frozen stream still answers subscriptions, from its own state, which is the rejected change's. A type the change
+left mid-way answers from its add round for good, as its removals never went out, so Envoy may still use what they
+would remove. For SotW the answer includes what was rejected, as each answer is the whole set. Resending it changes nothing Envoy has, where rolling it
 back would undo any part of it Envoy took.
 
 To unfreeze an Envoy, end its stream: `Client.Resync` cancels the stream's context, so `serve` returns nil and Envoy
@@ -402,8 +404,9 @@ that to tell the conformance suite when a stream is idle.
 `Events` (`Connected`, `Disconnected`, `Nacked`) are called on the serve loop, which waits for them. See
 [A stream's life](#3-a-streams-life) for when.
 
-Logging goes to `ServerConfig.Logger`, by default `slog.Default()`. Most records carry the type as `type`. The NACK,
-unknown type, resync and panic records also carry the node ID as `node`; the others don't.
+Logging goes to `ServerConfig.Logger`, by default `slog.Default()`. Most records carry the type as `type`. Each
+stream logs through `Logger.With("node", id)` from its first request, so every record of a stream carries its node ID
+as `node`.
 
 | Level | When |
 |---|---|

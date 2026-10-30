@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -96,6 +97,33 @@ func TestRoutesWaitForTheClustersAndEndpointsAnEnvoyIsBeingSent(t *testing.T) {
 		}
 		if rds := e.ack(eds[0]); !slices.Equal(types(rds), []xds.TypeURL{xds.RouteType}) {
 			t.Fatalf("got %v after the EDS ACK, want the routes", rds)
+		}
+	})
+}
+
+func TestRoutesWaitForTheClustersOfAChangeThatHasNotSentThemYet(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), &tlsv3.Secret{Name: "s"})
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{},
+			serving(xds.SecretType, xds.ClusterType, xds.EndpointType, xds.RouteType)))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		e.ack(e.subscribe(xds.SecretType, "s")[0])
+
+		update(src, &tlsv3.Secret{Name: "s", Type: &tlsv3.Secret_GenericSecret{GenericSecret: &tlsv3.GenericSecret{}}},
+			cluster("b"), route("r", "b"))
+		sds := e.sent()
+		if !slices.Equal(types(sds), []xds.TypeURL{xds.SecretType}) {
+			t.Fatalf("got %v, want the secret first", sds)
+		}
+		if rds := e.subscribe(xds.RouteType, "r"); len(rds) != 0 {
+			t.Fatalf("got %v, routing to b before it's sent", rds)
+		}
+		cds := e.ack(sds[0])
+		if !slices.Equal(types(cds), []xds.TypeURL{xds.ClusterType}) {
+			t.Fatalf("got %v after the secret's ACK, want the clusters", cds)
+		}
+		if rds := e.ack(cds[0]); !slices.Equal(types(rds), []xds.TypeURL{xds.RouteType}) {
+			t.Fatalf("got %v after the clusters' ACK, want the routes", rds)
 		}
 	})
 }
@@ -342,6 +370,20 @@ func TestNothingStaleMeansNoWarningAboutRemovingIt(t *testing.T) {
 	})
 }
 
+func TestNothingStaleMeansNoWarningAboutRemovingItOverDelta(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+
+		time.Sleep(30 * time.Second) // and nothing before EDS in remove order has answered
+		if sent := e.subscribe(xds.EndpointType, "a"); len(sent) != 1 || l.Len() != 0 {
+			t.Fatalf("got %v, logged %s", sent, l.String())
+		}
+	})
+}
+
 // churning serves clusters, each update adding one and removing another.
 type churning struct{}
 
@@ -400,6 +442,30 @@ func TestARequestNeverOvertakesAHeldOneOfItsType(t *testing.T) {
 		update(src, route("s", "b"))
 		if sent := e.sent(); len(sent) != 0 {
 			t.Fatalf("got %v, want nothing: Envoy unsubscribed from s", sent)
+		}
+	})
+}
+
+func TestLogsSayWhichEnvoy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := &logs{}
+		e := startDelta(t, newServer(t, newSource(cluster("a"), route("r", "a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.ack(e.reconnect(xds.ClusterType, []string{"gone"})[0]) // its removal waits for the routes
+
+		time.Sleep(30 * time.Second)
+		removal := e.ack(e.subscribe(xds.RouteType, "r")[0]) // gives up waiting for listeners, so removes gone
+		if len(removal) != 1 {
+			t.Fatalf("got %v after the route ACK, want gone removed", removal)
+		}
+		e.nack(removal[0])
+		lines := strings.Split(strings.TrimSpace(l.String()), "\n")
+		if len(lines) < 2 {
+			t.Fatalf("logged %q, want the give-up and the NACK", lines)
+		}
+		for _, line := range lines {
+			if !strings.Contains(line, "node=envoy") {
+				t.Errorf("logged %q without the node", line)
+			}
 		}
 	})
 }

@@ -234,7 +234,8 @@ type ConfigBuilder[U, D any] interface {
 
 - `ResourcesAddOrder` is every resource mid-change: what the update adds, and what it's yet to remove.
   `ResourcesRemoveOrder` is every resource once it's done. Subscriptions are answered from them: from
-  `ResourcesAddOrder` while the type's add round is still to go, and otherwise from `ResourcesRemoveOrder`.
+  `ResourcesAddOrder` until the type's remove round has been sent, and after a NACK stops it, and otherwise from
+  `ResourcesRemoveOrder`.
 - Return only names `subscribed` reports true for. Envoy rejects resources it didn't ask for, and the Server logs a
   warning for them.
 - Returning only what changed is best; returning more is safe, just more work.
@@ -367,7 +368,7 @@ with `Metrics: func() xds.Metrics { return &streamMetrics{} }`.
 
 **Logging** goes to `ServerConfig.Logger`, a `*slog.Logger`, or `slog.Default()` if nil. NACKs, requests for unknown
 types, builders returning names Envoy didn't ask for, and giving up on a 30-second wait are warnings; panics are
-errors.
+errors. Every record of a stream carries the Envoy's node ID as `node`.
 
 ## 9. Concurrency rules for your code
 

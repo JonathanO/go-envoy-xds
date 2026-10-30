@@ -41,8 +41,9 @@ type ConfigBuilder[U, D any] interface {
 	AddOrder(update U, subscribed func(name string) bool, details D) Response
 	// RemoveOrder is what update removes.
 	RemoveOrder(update U, subscribed func(name string) bool, details D) Response
-	// ResourcesAddOrder is every subscribed resource during update's add round, for an Envoy subscribing then:
-	// anything update adds, and anything it's yet to remove.
+	// ResourcesAddOrder is every subscribed resource from update's add round until its remove round, for an Envoy
+	// subscribing then: anything update adds, and anything it's yet to remove. An Envoy subscribing after it NACKed
+	// update gets this too, as the removals never went out.
 	ResourcesAddOrder(update U, subscribed func(name string) bool, details D) []Resource
 	// ResourcesRemoveOrder is every subscribed resource once update is done.
 	ResourcesRemoveOrder(update U, subscribed func(name string) bool, details D) []Resource
@@ -111,8 +112,9 @@ type Events[D any] struct {
 	// Disconnected is called when the stream of a Connected Envoy ends.
 	Disconnected func(c *Client[D])
 	// Nacked is called when an Envoy rejects config it was sent. From then on, its stream is sent no more changes: it
-	// keeps serving its last good config, which goes stale. Alert on it, and call Resync once the config is fixed, or
-	// use ResyncAfterNack to retry on a backoff.
+	// keeps serving its last good config, which goes stale. Its subscriptions are still answered, keeping anything
+	// the rejected change removes: those removals were never sent. Alert on it, and call Resync once the config is
+	// fixed, or use ResyncAfterNack to retry on a backoff.
 	Nacked func(c *Client[D], t TypeURL, detail *statuspb.Status)
 }
 
