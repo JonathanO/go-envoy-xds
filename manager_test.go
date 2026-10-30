@@ -342,6 +342,20 @@ func TestNothingStaleMeansNoWarningAboutRemovingIt(t *testing.T) {
 	})
 }
 
+func TestNothingStaleMeansNoWarningAboutRemovingItOverDelta(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"))
+		l := &logs{}
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+
+		time.Sleep(30 * time.Second) // and nothing before EDS in remove order has answered
+		if sent := e.subscribe(xds.EndpointType, "a"); len(sent) != 1 || l.Len() != 0 {
+			t.Fatalf("got %v, logged %s", sent, l.String())
+		}
+	})
+}
+
 // churning serves clusters, each update adding one and removing another.
 type churning struct{}
 
