@@ -240,12 +240,16 @@ func TestMetricsFollowPushesAndAcks(t *testing.T) {
 		second := e.subscribe(xds.EndpointType, "b")[0] // still waiting for an ACK of EDS
 		e.ack(first)                                    // not the latest
 		e.ack(second)
-		update(src, cluster("b"))
+		edit(src, func(e *snapshot.Editor) { e.Put(cluster("b")); e.Remove(xds.EndpointType, "b") })
 		cds := e.sent()[0]
 		if last := m.calls[len(m.calls)-1]; last != "began" {
 			t.Fatalf("%s before the push was ACKed", last)
 		}
-		e.ack(cds)
+		eds := e.ack(cds)[0]
+		if slices.Contains(m.calls, "completed") {
+			t.Fatalf("completed before the removal of b was ACKed: %v", eds)
+		}
+		e.ack(eds)
 		update(src, cluster("c"), route("r", "c"))
 		e.nack(e.sent()[0])
 		e.end()
