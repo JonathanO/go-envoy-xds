@@ -34,6 +34,8 @@ discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 
 To serve config from your own state instead, implement `xds.Source`, and an `xds.ConfigBuilder` per type.
 
+[examples](examples) has a toy control plane each way, to run against a real Envoy.
+
 ## How it serves Envoy
 
 - **Make before break.** Each change goes in two rounds, adds then removes, a type at a time, waiting for Envoy's ACK
