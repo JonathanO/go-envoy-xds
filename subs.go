@@ -142,15 +142,15 @@ func (w *deltaWildcard) update(subscribe, unsubscribe []string) (func(string) bo
 			return notWildcard, true, nil
 		}
 	}
-	newlyAll := false
+	was := w.all
 	if slices.Contains(subscribe, wildcard) {
-		newlyAll = !w.all
 		w.all = true
 		subscribe = withoutWildcard(subscribe)
 	}
 	if slices.Contains(unsubscribe, wildcard) {
-		w.all = false // and the names leave it be: none is the wildcard
+		w.all = false // unsubscribing wins, and the names leave it be: none is the wildcard
 	}
+	newlyAll := w.all && !was
 	added, changed, err := w.names.update(subscribe, unsubscribe)
 	if err != nil {
 		return nil, false, err
