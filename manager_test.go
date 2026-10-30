@@ -412,7 +412,11 @@ func TestLogsSayWhichEnvoy(t *testing.T) {
 		e.ack(e.reconnect(xds.ClusterType, []string{"gone"})[0]) // its removal waits for the routes
 
 		time.Sleep(30 * time.Second)
-		e.nack(e.subscribe(xds.RouteType, "r")[0]) // gives up waiting, then is rejected
+		removal := e.ack(e.subscribe(xds.RouteType, "r")[0]) // gives up waiting for listeners, so removes gone
+		if len(removal) != 1 {
+			t.Fatalf("got %v after the route ACK, want gone removed", removal)
+		}
+		e.nack(removal[0])
 		lines := strings.Split(strings.TrimSpace(l.String()), "\n")
 		if len(lines) < 2 {
 			t.Fatalf("logged %q, want the give-up and the NACK", lines)
