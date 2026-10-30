@@ -14,8 +14,9 @@ type viewState struct {
 	groups []*Snapshot
 
 	mu sync.Mutex
-	// What the view sees of each type, merged, once something needs the whole view: an Envoy connecting, or a SotW
-	// response. Changes to a few names look through the groups instead, so never pay to build it, nor take the lock.
+	// What the view sees of each type, merged, once something needs the whole view: an answer to a subscription, or an
+	// update that changed the view's groups. Changes to a few names look through the groups instead, so never pay to
+	// build it, nor take the lock.
 	merged map[xds.TypeURL]map[string]proto.Message
 }
 

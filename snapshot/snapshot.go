@@ -1,22 +1,3 @@
-// Package snapshot serves config from named groups of resources, in make-before-break order with no ordering code of
-// your own.
-//
-// A Source holds groups, each a Snapshot of any resources, and views, each an ordered list of groups. Every Envoy sees
-// one view, picked from its details. Publishing a change wakes only the Envoys whose view it touches, and each compares
-// only the names you touched. Serve it with Builders:
-//
-//	src := snapshot.New[string, string, string](func(node string) string { return "all" })
-//	src.Update(func(c *snapshot.Change[string, string]) {
-//		c.SetView("all", "all")
-//		c.EditGroup("all", func(e *snapshot.Editor) { e.Put(cluster) })
-//	})
-//	srv, err := xds.NewServer(xds.ServerConfig[*snapshot.Update, string]{
-//		Source:    src,
-//		Builders:  snapshot.Builders[string](xds.ClusterType, xds.EndpointType, xds.ListenerType, xds.RouteType),
-//		ConfigFor: func(_ context.Context, n *corev3.Node) (xds.EnvoyConfig[string], error) {
-//			return xds.EnvoyConfig[string]{Details: n.GetId()}, nil
-//		},
-//	})
 package snapshot
 
 import (
@@ -34,8 +15,9 @@ type names = map[string]struct{}
 
 // A Snapshot is immutable desired config: resources by type, then by name.
 //
-// Make new snapshots from old ones with Edit. What you don't change is shared with the old one, and the names you do
-// change are recorded, so working out what changed costs as much as the change, not the whole config.
+// Make new snapshots from old ones with Edit. What you don't change is shared with the old one. Change.EditGroup also
+// records the names an edit touches, so working out what changed costs as much as the change, not the whole config;
+// Change.SetGroup compares every name.
 type Snapshot struct {
 	resources map[xds.TypeURL]map[string]proto.Message
 }

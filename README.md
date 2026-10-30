@@ -8,6 +8,10 @@ It's for Envoy only, and aims to be the best at that.
 
 ## Use
 
+```sh
+go get github.com/JonathanO/go-envoy-xds
+```
+
 Package `snapshot` holds your config as named groups of resources, and views made of groups: every Envoy sees one
 view. Publishing a change wakes only the Envoys whose view it touches, and each compares only the names you touched.
 
@@ -32,20 +36,20 @@ if err != nil {
 discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 ```
 
-To serve config from your own state instead, implement `xds.Source`, and an `xds.ConfigBuilder` per type.
+- [docs/USAGE.md](docs/USAGE.md): building a control plane with it, from quick start to testing against Envoy.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works, for changing it.
+- [pkg.go.dev](https://pkg.go.dev/github.com/JonathanO/go-envoy-xds): the API, with runnable examples.
 
 ## How it serves Envoy
 
 - **Make before break.** Each change goes in two rounds, adds then removes, a type at a time, waiting for Envoy's ACK
-  before the next. Clusters are added before the routes that use them, and removed after.
-- **Bursts merge.** Updates that arrive while an Envoy is busy merge into one, if their type is an `xds.Merger`, as
-  `snapshot.Update` is. Mesh updates come in bursts, and pushing each to every Envoy is expensive.
-- **Phases.** To order changes make before break can't see, split an update with `Change.Then`: each Envoy gets, and
-  ACKs, each phase before the next.
-- **A NACK freezes the stream.** A rejected change won't fix itself, so the Envoy is sent no more changes and keeps its
-  last good config. `Events.Nacked` tells you; `Client.Resync`, or `xds.ResyncAfterNack`, starts it afresh.
-- **Reconnects.** What a delta Envoy kept over a reconnect, and is gone since, is removed in remove order, once the
-  types that may refer to it are ACKed.
+  before the next.
+- **Bursts merge.** Updates that arrive while an Envoy is busy merge into one, if they're `xds.Merger`s, as
+  snapshot's are.
+- **Phases.** `Change.Then` orders changes make before break can't see.
+- **A NACK freezes the stream.** The Envoy keeps its last good config until you resync it.
+
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) has the details.
 
 ## Testing
 
