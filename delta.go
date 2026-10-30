@@ -66,7 +66,7 @@ func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(stri
 			s.answeredDuringChange[r.Name] = struct{}{}
 		}
 	}
-	if s.deferRemovals() {
+	if len(stale) > 0 && s.deferRemovals() { // asking may give up waiting, and warn
 		maps.Copy(s.deferred, stale)
 	} else {
 		maps.Copy(removed, stale)
