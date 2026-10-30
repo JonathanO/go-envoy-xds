@@ -136,7 +136,7 @@ func FuzzDeltaSubs(f *testing.F) {
 			}
 			explicit, all, first := set{}, false, true
 			for i := 0; i+1 < len(reqs); i += 2 {
-				sub, unsub := namesOf(reqs[i]), namesOf(reqs[i+1]&^reqs[i]) // never both at once
+				sub, unsub := namesOf(reqs[i]), namesOf(reqs[i+1]&^(reqs[i]&7)) // never a name in both, but the wildcard may be
 				if !wild {
 					sub, unsub = withoutWildcard(sub), withoutWildcard(unsub)
 				}
@@ -172,10 +172,10 @@ func FuzzDeltaSubs(f *testing.F) {
 				switch {
 				case wild && first && len(sub) == 0 && len(unsub) == 0:
 					all = true
+				case slices.Contains(unsub, wildcard): // unsubscribing wins
+					all = false
 				case slices.Contains(sub, wildcard):
 					all = true
-				case slices.Contains(unsub, wildcard):
-					all = false
 				}
 				first = false
 				// Unsubscribing needs no answer, and an empty one would hold up pushes until Envoy ACKed it.

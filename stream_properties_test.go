@@ -76,7 +76,7 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 		t.Fatal(err)
 	}
 	e := start(t, p.serve(srv))
-	asked := map[string]bool{}
+	heard := map[string]*subscription{} // by type asked for
 	var nonces []string
 	live, envoyEnded := true, false
 	for len(*d) > 0 {
@@ -86,7 +86,9 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 				continue
 			}
 			typ := typeURLs[d.next(len(typeURLs))]
-			asked[typ] = true
+			if heard[typ] == nil {
+				heard[typ] = &subscription{names: map[string]bool{}}
+			}
 			n := &corev3.Node{Id: []string{"", "a", "envoy"}[d.next(3)]}
 			nonce := []string{"", "bogus"}[d.next(2)]
 			if len(nonces) > 0 && d.next(2) == 1 {
@@ -99,7 +101,9 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 					nacksSent++
 				}
 			}
-			e.stream.reqs <- p.request(d, n, typ, nonce, detail) // its responses are checked below
+			req := p.request(d, n, typ, nonce, detail)
+			heard[typ].hear(req, xds.TypeURL(typ).Wildcard())
+			e.stream.reqs <- req // its responses are checked below
 		case action < 8:
 			src.change()
 		case action < 9:
@@ -126,7 +130,8 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 				t.Fatal("a response after the stream ended")
 			}
 			typ, nonce, resources := p.response(r)
-			if !asked[typ] || messages[xds.TypeURL(typ)] == nil {
+			h := heard[typ]
+			if h == nil || messages[xds.TypeURL(typ)] == nil {
 				t.Fatalf("answered %q, which wasn't asked for or isn't known", typ)
 			}
 			for _, a := range resources {
@@ -134,10 +139,22 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 					t.Fatalf("a %s in a response of %s", a.GetTypeUrl(), typ)
 				}
 			}
-			// Go's SotW lists resources by name, where Java's keeps them in the order they came.
-			if r, ok := any(r).(*discoveryv3.DiscoveryResponse); ok && !slices.IsSorted(names(t, r)) {
-				t.Fatalf("resources out of order: %v", names(t, r))
+			var sent []string
+			switch r := any(r).(type) {
+			case *discoveryv3.DiscoveryResponse:
+				// Go's SotW lists resources by name, where Java's keeps them in the order they came.
+				if sent = names(t, r); !slices.IsSorted(sent) {
+					t.Fatalf("resources out of order: %v", sent)
+				}
+			case *discoveryv3.DeltaDiscoveryResponse:
+				sent = deltaNames(r)
 			}
+			for _, name := range sent {
+				if !mayWait[xds.TypeURL(typ)] && !h.all && !h.names[name] {
+					t.Fatalf("sent %s %s, which Envoy isn't subscribed to", typ, name)
+				}
+			}
+			h.nonce = nonce
 			nonces = append(nonces, nonce)
 		}
 		select {
@@ -157,6 +174,44 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 		}
 		if nacks != nacksSent {
 			t.Fatalf("told of %d NACKs of %d", nacks, nacksSent)
+		}
+	}
+}
+
+// mayWait are the types whose requests may wait for clusters, and be answered after later ones.
+var mayWait = map[xds.TypeURL]bool{xds.ListenerType: true, xds.RouteType: true, xds.ScopedRouteType: true, xds.VirtualHostType: true}
+
+// subscription is what the server has heard Envoy subscribe to, of one type.
+type subscription struct {
+	all    bool // to everything
+	before bool // for SotW, named something before; for delta, asked before
+	names  map[string]bool
+	nonce  string // of the last response: SotW ignores a request answering any other
+}
+
+func (s *subscription) hear(req any, wild bool) {
+	switch req := req.(type) {
+	case *discoveryv3.DiscoveryRequest:
+		if s.nonce != "" && req.GetResponseNonce() != s.nonce {
+			return
+		}
+		ns := req.GetResourceNames()
+		s.all = wild && (slices.Contains(ns, "*") || (len(ns) == 0 && !s.before)) // an empty first list is the legacy wildcard
+		s.before = s.before || len(ns) > 0
+		clear(s.names)
+		for _, n := range ns {
+			s.names[n] = true
+		}
+	case *discoveryv3.DeltaDiscoveryRequest:
+		sub, unsub := req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe()
+		legacy := !s.before && len(sub) == 0 && len(unsub) == 0
+		s.before = true
+		s.all = wild && (s.all || legacy || slices.Contains(sub, "*")) && !slices.Contains(unsub, "*") // unsubscribing wins
+		for _, n := range sub {
+			s.names[n] = true
+		}
+		for _, n := range unsub {
+			delete(s.names, n)
 		}
 	}
 }
