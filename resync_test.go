@@ -42,7 +42,7 @@ func TestResyncAfterNackBacksOffWhileNacksRepeat(t *testing.T) {
 		if waited := nack(); waited != 4*time.Second {
 			t.Fatalf("waited %v after a quiet spell of twice the max, want 4s still", waited)
 		}
-		time.Sleep(4*time.Second + 1)
+		time.Sleep(4*time.Second + time.Nanosecond)
 		if waited := nack(); waited != time.Second {
 			t.Fatalf("waited %v after a quiet spell of over twice the max, want to start again from 1s", waited)
 		}

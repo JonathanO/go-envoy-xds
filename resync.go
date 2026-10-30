@@ -15,7 +15,7 @@ import (
 // While it waits, that Envoy gets no changes, so the maximum is the longest you'll have it serve stale config, e.g.
 // endpoints for pods that have gone.
 type ResyncAfterNack[D any] struct {
-	initial, max time.Duration
+	initial, maxWait time.Duration
 
 	mu       sync.Mutex
 	pending  map[*Client[D]]*time.Timer
@@ -27,9 +27,9 @@ type backoff struct {
 	lastNack time.Time
 }
 
-// NewResyncAfterNack waits initial before the first resync, and never more than max.
-func NewResyncAfterNack[D any](initial, max time.Duration) *ResyncAfterNack[D] {
-	return &ResyncAfterNack[D]{initial: initial, max: max, pending: map[*Client[D]]*time.Timer{}, backoffs: map[string]backoff{}}
+// NewResyncAfterNack waits initial before the first resync, and never more than maxWait.
+func NewResyncAfterNack[D any](initial, maxWait time.Duration) *ResyncAfterNack[D] {
+	return &ResyncAfterNack[D]{initial: initial, maxWait: maxWait, pending: map[*Client[D]]*time.Timer{}, backoffs: map[string]backoff{}}
 }
 
 // Nacked schedules a resync, on a stream's first NACK.
@@ -57,10 +57,10 @@ func (r *ResyncAfterNack[D]) next(id string) time.Duration {
 	now := time.Now()
 	// Forget Envoys that have gone quiet, which would start from initial anyway: node IDs come and go with pods.
 	// ponytail: scans every node on each NACK; fine while NACKs are rare, sweep on a timer if they aren't.
-	maps.DeleteFunc(r.backoffs, func(_ string, b backoff) bool { return now.Sub(b.lastNack) > 2*r.max })
+	maps.DeleteFunc(r.backoffs, func(_ string, b backoff) bool { return now.Sub(b.lastNack) > 2*r.maxWait })
 	b, ok := r.backoffs[id]
 	if ok {
-		b.delay = min(2*b.delay, r.max)
+		b.delay = min(2*b.delay, r.maxWait)
 	} else {
 		b.delay = r.initial
 	}

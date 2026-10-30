@@ -112,7 +112,8 @@ func (s *deltaNames) update(subscribe, unsubscribe []string) (func(string) bool,
 	if s.subs == nil {
 		s.subs = set{}
 	}
-	maps.Copy(s.subs, setOf(subscribe))
+	added := setOf(subscribe)
+	maps.Copy(s.subs, added)
 	for n := range drop {
 		delete(s.subs, n)
 	}
@@ -120,7 +121,7 @@ func (s *deltaNames) update(subscribe, unsubscribe []string) (func(string) bool,
 		// Unsubscribing needs no answer, and an empty one would hold up pushes until Envoy ACKed it.
 		return nil, false, nil
 	}
-	return setOf(subscribe).has, true, nil
+	return added.has, true, nil
 }
 
 func (s *deltaNames) subscribed(name string) bool { return s.subs.has(name) }

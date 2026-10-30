@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"iter"
+	"maps"
 	"slices"
 	"sync"
 
@@ -183,7 +185,8 @@ func (s *Source[D, G, V]) stateOf(view V) *viewState {
 	return v
 }
 
-// Subscribe starts delivering the updates to an Envoy's view, for xds.Server.
+// Subscribe starts delivering the updates to an Envoy's view, for xds.Server. deliver is called with the Source
+// locked, so it mustn't block, nor call the Source, including the cancel func Subscribe returns.
 func (s *Source[D, G, V]) Subscribe(details D, deliver func(*Update)) (*Update, func()) {
 	view := s.viewOf(details)
 	sub := &subscriber{deliver}
@@ -223,7 +226,7 @@ func newPhase[G, V comparable]() *phase[G, V] {
 	return &phase[G, V]{groups: map[G]*Snapshot{}, touched: map[G]map[xds.TypeURL]names{}, views: map[V][]G{}}
 }
 
-func (p *phase[G, V]) touch(name G, t xds.TypeURL, ns names) {
+func (p *phase[G, V]) touch(name G, t xds.TypeURL, ns iter.Seq[string]) {
 	if p.touched[name] == nil {
 		p.touched[name] = map[xds.TypeURL]names{}
 	}
@@ -237,11 +240,7 @@ func (p *phase[G, V]) touch(name G, t xds.TypeURL, ns names) {
 
 func (p *phase[G, V]) touchAll(name G, s *Snapshot) {
 	for t, rs := range s.resources {
-		ns := make(names, len(rs))
-		for n := range rs {
-			ns[n] = struct{}{}
-		}
-		p.touch(name, t, ns)
+		p.touch(name, t, maps.Keys(rs))
 	}
 }
 
@@ -262,7 +261,7 @@ func (c *Change[G, V]) EditGroup(name G, edit func(e *Editor)) {
 	edit(e)
 	p := c.last()
 	for t, ns := range e.touched {
-		p.touch(name, t, ns)
+		p.touch(name, t, maps.Keys(ns))
 	}
 	p.groups[name] = e.Build()
 }
