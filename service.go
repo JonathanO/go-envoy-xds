@@ -104,11 +104,8 @@ func (b *base[U, D]) adds(subscribed func(string) bool) (r Response) {
 	return r
 }
 
-// removes is the staged change's remove round, if it's not been sent.
+// removes is the staged change's remove round. It's sent once, after the add round.
 func (b *base[U, D]) removes(subscribed func(string) bool) (r Response) {
-	if b.round != removing {
-		return
-	}
 	b.round = idle
 	if !b.active || b.builder == nil {
 		return
