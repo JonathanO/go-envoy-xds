@@ -28,7 +28,8 @@ type ServerConfig[U, D any] struct {
 	Builders []ConfigBuilder[U, D]
 	// ConfigFor gives an Envoy's config from the node in its first request. An error ends the stream with it.
 	ConfigFor func(ctx context.Context, node *corev3.Node) (EnvoyConfig[D], error)
-	Events    Events[D]
+	// Events are told what Envoys do.
+	Events Events[D]
 	// Metrics, if set, makes the Metrics for each stream.
 	Metrics func() Metrics
 	// Logger defaults to slog.Default().
@@ -94,15 +95,17 @@ func (s *Server[U, D]) DeltaAggregatedResources(stream grpc.BidiStreamingServer[
 			if t.Wildcard() {
 				subs = &deltaWildcard{}
 			}
-			services[t] = &deltaService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs,
+			svc := &deltaService[U, D]{base: s.base(t, cfg), send: send, fail: fail, subs: subs,
 				answeredDuringChange: set{}}
+			svc.deferred = set{} // only delta has stale names to defer
+			services[t] = svc
 		}
 		return services
 	})
 }
 
 func (s *Server[U, D]) base(t TypeURL, cfg EnvoyConfig[D]) base[U, D] {
-	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: s.log, deferred: set{}}
+	return base[U, D]{typ: t, builder: s.builders[t], details: cfg.Details, log: s.log}
 }
 
 // errResync ends a stream for Client.Resync.

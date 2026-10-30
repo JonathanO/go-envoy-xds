@@ -54,14 +54,17 @@ type Source[U, D any] interface {
 	// from. It must not miss an update published while it runs.
 	//
 	// The Source calls deliver with each update, in order, one at a time. deliver never blocks. After cancel returns,
-	// deliver may still be called, and does nothing.
+	// deliver may still be called, and does nothing. The Server doesn't compare updates, so each one delivered is
+	// pushed, ConfigBuilders and all, even if it's equal to the last.
 	Subscribe(details D, deliver func(update U)) (current U, cancel func())
 }
 
 // A Merger is a state update that can take in the update after it, so an Envoy that's busy when several arrive gets
 // them as one. Merge returns the update equal to applying the receiver, then next.
 //
-// A Server merges updates whose type is a Merger, and queues the rest.
+// A Server merges updates whose type is a Merger, and queues the rest. If the type also has a MergesWithLater() bool
+// method, nothing later merges into an update for which it returns false: the Envoy gets that update, and ACKs it,
+// first.
 type Merger[U any] interface {
 	Merge(next U) U
 }
@@ -115,11 +118,13 @@ type Events[D any] struct {
 
 // Metrics records how one stream's pushes go. A Server calls it from the stream's goroutine.
 type Metrics interface {
-	// PushBegan is called when an update starts going to Envoy, and PushCompleted when Envoy has ACKed all of it.
+	// PushBegan is called when an update starts going to Envoy.
 	PushBegan()
+	// PushCompleted is called when Envoy has ACKed all of the update.
 	PushCompleted()
-	// AwaitingAck is called when we start waiting for Envoy to ACK a type, and Acked when it does.
+	// AwaitingAck is called when we start waiting for Envoy to ACK a type.
 	AwaitingAck()
+	// Acked is called when Envoy ACKs it.
 	Acked()
 	// Closed is called when the stream ends.
 	Closed()

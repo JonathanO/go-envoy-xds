@@ -193,9 +193,9 @@ func (e *envoy[Req, Resp]) sent() []*Resp {
 	synctest.Wait()
 	e.stream.mu.Lock()
 	defer e.stream.mu.Unlock()
-	new := e.stream.sent[e.read:]
+	fresh := e.stream.sent[e.read:]
 	e.read = len(e.stream.sent)
-	return new
+	return fresh
 }
 
 var node = &corev3.Node{Id: "envoy"}

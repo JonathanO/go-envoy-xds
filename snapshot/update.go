@@ -63,7 +63,7 @@ type Update struct {
 	endsPhase         bool                    // a later phase of the same change follows, so nothing merges into this
 }
 
-// Merge returns the update from u's previous state to next's current one.
+// Merge returns the update from u's previous state to next's current one. It panics if next doesn't follow on from u.
 func (u *Update) Merge(next *Update) *Update {
 	if next.previous != u.current {
 		panic("snapshot: updates merged out of order")

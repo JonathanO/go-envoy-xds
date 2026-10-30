@@ -227,12 +227,12 @@ func TestDelayUpdatesUntilAckOfGivesUpAfterThirtySeconds(t *testing.T) {
 		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{DelayUpdatesUntilAckOf: xds.RouteType}, xds.Events[string]{}, l.option))
 		e.ack(e.subscribe(xds.ClusterType)[0])
 
-		time.Sleep(30*time.Second - 1)
+		time.Sleep(30*time.Second - time.Nanosecond)
 		update(src, cluster("b"))
 		if sent := e.sent(); len(sent) != 0 {
 			t.Fatalf("got %v, want b held still", sent)
 		}
-		time.Sleep(1)
+		time.Sleep(time.Nanosecond)
 		update(src, cluster("c"))
 		if sent := e.sent(); len(sent) != 1 {
 			t.Fatalf("got %v, want b and c sent anyway", sent)
