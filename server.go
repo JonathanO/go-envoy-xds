@@ -168,12 +168,12 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 	}()
 	handle := func(req R) error {
 		if client == nil {
+			log = srv.log.With("node", req.GetNode().GetId()) // before ConfigFor, so its failure says which Envoy
 			cfg, err := srv.configFor(ctx, req.GetNode())
 			if err != nil {
 				return err
 			}
 			client = &Client[D]{Node: req.GetNode(), Config: cfg, resync: func() { cancel(errResync) }}
-			log = srv.log.With("node", client.Node.GetId())
 			if srv.events.Connected != nil {
 				srv.events.Connected(client)
 			}
