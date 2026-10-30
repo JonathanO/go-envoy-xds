@@ -124,7 +124,7 @@ type Metrics interface {
 	PushCompleted()
 	// AwaitingAck is called when we start waiting for Envoy to ACK a type.
 	AwaitingAck()
-	// Acked is called when Envoy ACKs it.
+	// Acked is called when Envoy ACKs a type it was awaiting the ACK of.
 	Acked()
 	// Closed is called when the stream ends.
 	Closed()
