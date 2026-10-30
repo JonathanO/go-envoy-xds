@@ -232,7 +232,8 @@ func (m *manager[R, U]) pushAllowed() bool {
 }
 
 func (m *manager[R, U]) pushAllowedWork() {
-	if m.frozen || len(m.outstanding) > 0 {
+	// Nor while requests are held: a type that hasn't heard its first one would be skipped, though Envoy has some of it.
+	if m.frozen || len(m.outstanding) > 0 || len(m.held) > 0 {
 		return
 	}
 	m.pushDeferredRemovals() // the ACK one waits for holds the change too: see pushAllowed

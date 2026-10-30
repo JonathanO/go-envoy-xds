@@ -469,3 +469,35 @@ func TestLogsSayWhichEnvoy(t *testing.T) {
 		}
 	})
 }
+
+func TestAChangeWaitsForHeldRequestsSoItSkipsNoTypeEnvoyHas(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), listener("l"))
+		cfg := xds.EnvoyConfig[string]{SubscribesTo: []xds.TypeURL{xds.ClusterType, xds.EndpointType, xds.ListenerType}}
+		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}))
+		// A reconnecting Envoy kept l, which routes to a, and asks for everything at once.
+		pending := e.reconnect(xds.ClusterType, []string{"a"})
+		pending = append(pending, e.reconnect(xds.EndpointType, []string{"a"}, "a")...)
+		if held := e.reconnect(xds.ListenerType, []string{"l"}); len(held) != 0 {
+			t.Fatalf("got %v while the clusters await their ACK", held)
+		}
+		edit(src, func(e *snapshot.Editor) {
+			e.Remove(xds.ListenerType, "l")
+			e.Remove(xds.ClusterType, "a")
+			e.Remove(xds.EndpointType, "a")
+		})
+
+		var removed []string
+		for len(pending) > 0 {
+			r := pending[0]
+			for _, n := range r.GetRemovedResources() {
+				removed = append(removed, r.GetTypeUrl()+" "+n)
+			}
+			pending = append(pending[1:], e.ack(r)...)
+		}
+		want := []string{string(xds.ListenerType) + " l", string(xds.ClusterType) + " a", string(xds.EndpointType) + " a"}
+		if !slices.Equal(removed, want) {
+			t.Fatalf("removed %v,\nwant %v", removed, want)
+		}
+	})
+}
