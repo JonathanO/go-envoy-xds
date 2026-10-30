@@ -1,8 +1,3 @@
-// Package xds serves config to Envoys over ADS, SotW or delta, in make-before-break order: whatever a change adds is
-// in place before anything that refers to it, and nothing is removed while something still refers to it.
-//
-// A Server takes state updates from a Source, and turns each into resources with a ConfigBuilder per type. Package
-// snapshot provides both, from named groups of resources.
 package xds
 
 import (

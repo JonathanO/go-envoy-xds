@@ -98,9 +98,9 @@ type Client[D any] struct {
 	resync func()
 }
 
-// Resync closes the stream, so the Envoy reconnects and syncs from scratch: its first request on the new stream says
-// exactly what config it has. Use it to unfreeze an Envoy that NACKed, once its config is fixed. Safe to call from any
-// goroutine, at any time.
+// Resync closes the stream, so the Envoy reconnects and syncs from scratch: on the new stream, a delta Envoy says what
+// config it kept, and SotW answers are each the whole set. Use it to unfreeze an Envoy that NACKed, once its config is
+// fixed. Safe to call from any goroutine, at any time.
 func (c *Client[D]) Resync() { c.resync() }
 
 // Events are told what Envoys do. Any may be nil.
@@ -122,11 +122,13 @@ type Events[D any] struct {
 type Metrics interface {
 	// PushBegan is called when an update starts going to Envoy.
 	PushBegan()
-	// PushCompleted is called when Envoy has ACKed all of the update.
+	// PushCompleted is called when Envoy has ACKed all of the update, or when a NACK stops it.
 	PushCompleted()
-	// AwaitingAck is called when we start waiting for Envoy to ACK a type.
+	// AwaitingAck is called when an answer to a subscription, or a removal of what a reconnecting Envoy kept, awaits
+	// Envoy's ACK. A push's responses are covered by PushBegan and PushCompleted: AwaitingAck is called for one only if
+	// a request of its type comes while it awaits its ACK.
 	AwaitingAck()
-	// Acked is called when Envoy ACKs a type it was awaiting the ACK of.
+	// Acked is called when Envoy ACKs, or NACKs, what AwaitingAck was called for.
 	Acked()
 	// Closed is called when the stream ends.
 	Closed()
