@@ -112,13 +112,13 @@ func (m *manager[R, U]) process(req R) error {
 }
 
 // mustWait reports whether to answer a request later, in add order: see usesClusters. It never overtakes a held request
-// of its type, as each follows on from the last. Otherwise a NACK never waits, nor an ACK its service is waiting for.
+// of its type, as each follows on from the last. Otherwise an ACK its service is waiting for never waits.
 func (m *manager[R, U]) mustWait(req R) bool {
 	t := TypeURL(req.GetTypeUrl())
 	if slices.ContainsFunc(m.held, func(h R) bool { return TypeURL(h.GetTypeUrl()) == t }) {
 		return true
 	}
-	return usesClusters(t) && req.GetErrorDetail() == nil && !m.services[t].awaitingAck() && m.clustersAwaitingAck()
+	return usesClusters(t) && !m.services[t].awaitingAck() && m.clustersAwaitingAck()
 }
 
 func (m *manager[R, U]) handle(req R) error {
