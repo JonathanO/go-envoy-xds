@@ -119,18 +119,32 @@ type adsStream[R request, S any] interface {
 
 // serve runs one stream. Its goroutine owns the stream's state, so the only locking is in the mailbox.
 func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S],
-	newServices func(send func(S), fail func(error), cfg EnvoyConfig[D]) map[TypeURL]service[R, U]) error {
+	newServices func(send func(S), fail func(error), cfg EnvoyConfig[D]) map[TypeURL]service[R, U]) (err error) {
 	ctx, cancel := context.WithCancelCause(stream.Context())
 	defer cancel(nil)
+
+	var (
+		client *Client[D]
+		m      *manager[R, U]
+		ready  <-chan struct{} // the mailbox's, once there's a manager
+	)
+	// A panic, from a builder say, ends this stream alone, after the cleanup below.
+	defer func() {
+		if p := recover(); p != nil {
+			var id string
+			if client != nil {
+				id = client.Node.GetId()
+			}
+			srv.log.Error("Panicked serving an Envoy, so closing its stream", "node", id, "panic", p)
+			err = status.Error(codes.Internal, "xds: internal error")
+		}
+	}()
 
 	requests := make(chan R)
 	go func() {
 		for {
 			req, err := stream.Recv()
 			if err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
-					srv.log.Warn("Error streaming to an ADS client", "error", err) // not Envoy closing its side or going away
-				}
 				cancel(err)
 				return
 			}
@@ -147,11 +161,6 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 		}
 	}
 
-	var (
-		client *Client[D]
-		m      *manager[R, U]
-		ready  <-chan struct{} // the mailbox's, once there's a manager
-	)
 	defer func() {
 		if m != nil {
 			m.close()
@@ -199,23 +208,27 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 	for {
 		select {
 		case <-ctx.Done():
-			return ended(ctx)
+			return srv.ended(client, context.Cause(ctx))
 		case <-ready:
 			m.updatesWaiting()
 		case req := <-requests:
 			if err := handle(req); err != nil {
-				return err
+				return srv.ended(client, err)
 			}
 		}
 	}
 }
 
-// ended is what serve returns once ctx is done.
-func ended(ctx context.Context) error {
-	switch err := context.Cause(ctx); {
-	case errors.Is(err, errResync), errors.Is(err, io.EOF):
+// ended is what serve returns when the stream ends with err.
+func (s *Server[U, D]) ended(c *Client[D], err error) error {
+	switch {
+	case errors.Is(err, errResync):
+		s.log.Info("Closing stream so it resyncs", "node", c.Node.GetId())
 		return nil // Envoy reconnects
-	default:
-		return err
+	case errors.Is(err, io.EOF):
+		return nil
+	case !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled: // not Envoy going away
+		s.log.Warn("Error streaming to an ADS client", "error", err)
 	}
+	return err
 }
