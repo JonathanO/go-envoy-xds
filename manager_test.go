@@ -101,6 +101,33 @@ func TestRoutesWaitForTheClustersAndEndpointsAnEnvoyIsBeingSent(t *testing.T) {
 	})
 }
 
+func TestRoutesWaitForTheClustersOfAChangeThatHasNotSentThemYet(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), &tlsv3.Secret{Name: "s"})
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{},
+			serving(xds.SecretType, xds.ClusterType, xds.EndpointType, xds.RouteType)))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		e.ack(e.subscribe(xds.SecretType, "s")[0])
+
+		update(src, &tlsv3.Secret{Name: "s", Type: &tlsv3.Secret_GenericSecret{GenericSecret: &tlsv3.GenericSecret{}}},
+			cluster("b"), route("r", "b"))
+		sds := e.sent()
+		if !slices.Equal(types(sds), []xds.TypeURL{xds.SecretType}) {
+			t.Fatalf("got %v, want the secret first", sds)
+		}
+		if rds := e.subscribe(xds.RouteType, "r"); len(rds) != 0 {
+			t.Fatalf("got %v, routing to b before it's sent", rds)
+		}
+		cds := e.ack(sds[0])
+		if !slices.Equal(types(cds), []xds.TypeURL{xds.ClusterType}) {
+			t.Fatalf("got %v after the secret's ACK, want the clusters", cds)
+		}
+		if rds := e.ack(cds[0]); !slices.Equal(types(rds), []xds.TypeURL{xds.RouteType}) {
+			t.Fatalf("got %v after the clusters' ACK, want the routes", rds)
+		}
+	})
+}
+
 func TestAnAckOfRoutesIsNeverHeld(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"), cla("a", "10.0.0.1"), listener("l"), route("r", "a"))
