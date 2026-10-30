@@ -233,8 +233,8 @@ type ConfigBuilder[U, D any] interface {
 ```
 
 - `ResourcesAddOrder` is every resource mid-change: what the update adds, and what it's yet to remove.
-  `ResourcesRemoveOrder` is every resource once it's done. They answer an Envoy that subscribes while a change is
-  under way, or at all.
+  `ResourcesRemoveOrder` is every resource once it's done. Subscriptions are answered from them: from
+  `ResourcesAddOrder` while the type's add round is still to go, and otherwise from `ResourcesRemoveOrder`.
 - Return only names `subscribed` reports true for. Envoy rejects resources it didn't ask for, and the Server logs a
   warning for them.
 - Returning only what changed is best; returning more is safe, just more work.
@@ -277,8 +277,8 @@ Both 30-second waits are checked when something happens on the stream, a request
 
 ## 6. Phases
 
-Make before break orders types: clusters go before the routes that use them, and are removed after. It can't order
-two changes to existing resources of different types. Say a route stops using a subset of a cluster, and the cluster
+Make before break orders types: clusters go before the routes that use them, and are removed after. It can't see
+when a change to an existing resource must wait for a change to a resource of a later type. Say a route stops using a subset of a cluster, and the cluster
 drops the subset: both are changes, so both go in the add round, clusters first, and the route briefly uses a subset
 that's gone.
 
