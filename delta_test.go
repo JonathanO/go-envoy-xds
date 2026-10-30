@@ -90,6 +90,60 @@ func TestDeltaSendsNoneOfAChangeAgainThatASubscriptionWasAnsweredWith(t *testing
 	})
 }
 
+func TestDeltaSubscriptionBeforeItsTypesRemoveRoundGetsWhatTheRoundRemovesThenItsRemoval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), cla("x", "10.0.0.9"), route("r", "a"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		e.ack(e.subscribe(xds.RouteType, "r")[0])
+		e.ack(e.subscribe(xds.EndpointType, "a")[0])
+
+		edit(src, func(e *snapshot.Editor) {
+			e.Remove(xds.RouteType, "r")
+			e.Remove(xds.EndpointType, "x")
+		})
+		rds := e.sent()[0]
+		eds := e.subscribe(xds.EndpointType, "x")
+		if len(eds) != 1 || !slices.Equal(deltaNames(eds[0]), []string{"x"}) || len(eds[0].GetRemovedResources()) != 0 {
+			t.Fatalf("got %v, want x: its removal waits for the routes'", eds)
+		}
+		e.ack(eds[0])
+		if sent := e.ack(rds); len(sent) != 1 || !slices.Equal(sent[0].GetRemovedResources(), []string{"x"}) {
+			t.Fatalf("got %v after the route ACK, want x removed in turn", sent)
+		}
+	})
+}
+
+func TestDeltaReconnectingMidChangeKeepsWhatTheChangeRemovesUntilItsTurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cluster("x"), cla("a", "10.0.0.1"), listener("l"), route("r", "a"), route("r2", "x"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ListenerType)[0])
+		e.ack(e.subscribe(xds.RouteType, "r", "r2")[0])
+		e.ack(e.subscribe(xds.EndpointType, "a")[0])
+
+		edit(src, func(e *snapshot.Editor) {
+			e.Put(cla("a", "10.0.0.2"))
+			e.Remove(xds.RouteType, "r2")
+			e.Remove(xds.ClusterType, "x")
+		})
+		eds := e.sent()[0]
+		// The reconnected Envoy asks for clusters last. It kept x, which r2 still routes to.
+		cds := e.reconnect(xds.ClusterType, []string{"a", "x"}, "*")
+		if len(cds) != 1 || !slices.Equal(deltaNames(cds[0]), []string{"a", "x"}) || len(cds[0].GetRemovedResources()) != 0 {
+			t.Fatalf("got %v, want a and x: x isn't stale until its remove round", cds)
+		}
+		e.ack(cds[0])
+		rds := e.ack(eds)
+		if !slices.Equal(types(rds), []xds.TypeURL{xds.RouteType}) || !slices.Equal(rds[0].GetRemovedResources(), []string{"r2"}) {
+			t.Fatalf("got %v after the endpoints' ACK, want r2 removed", rds)
+		}
+		if sent := e.ack(rds[0]); len(sent) != 1 || !slices.Equal(sent[0].GetRemovedResources(), []string{"x"}) {
+			t.Fatalf("got %v after r2's removal is ACKed, want x removed", sent)
+		}
+	})
+}
+
 func TestDeltaSubscribingToAndUnsubscribingFromANameAtOnceEndsTheStream(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e := startDelta(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}))

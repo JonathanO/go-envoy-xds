@@ -11,12 +11,14 @@ type service[R request, U any] interface {
 	// process handles a request for its type: an ACK or NACK, a subscription change, or both.
 	process(req R) error
 	awaitingAck() bool
+	// addsToCome reports whether the staged change's add round is still to be sent.
+	addsToCome() bool
 	init(state U)
 	// stage takes the next change, to send in sendAdds and sendRemoves.
 	stage(change U)
 	sendAdds()
 	sendRemoves()
-	// abandon drops what's left of the staged change. Called when Envoy NACKs.
+	// abandon drops what's left of the staged change, so its remove round never goes out. Called when Envoy NACKs.
 	abandon()
 	served() bool
 	hasAnswered() bool
@@ -53,22 +55,31 @@ func (b *base[U, D]) typeURL() TypeURL  { return b.typ }
 func (b *base[U, D]) init(state U)      { b.state = state }
 func (b *base[U, D]) served() bool      { return b.builder != nil }
 func (b *base[U, D]) hasAnswered() bool { return b.version > 0 }
-func (b *base[U, D]) abandon()          { b.round = idle }
+func (b *base[U, D]) addsToCome() bool  { return b.round == adding }
 
 func (b *base[U, D]) deferredRemovals() bool { return len(b.deferred) > 0 }
+
+// abandon stops the staged change where it is. A type still mid-change stays so for good: its remove round is never
+// sent, so what it would remove stays in answers, as Envoy may still use it. After a NACK only answers are sent.
+func (b *base[U, D]) abandon() {
+	if b.round != idle {
+		b.round = removing
+	}
+}
 
 func (b *base[U, D]) stage(change U) {
 	b.state = change
 	b.round = adding
 }
 
-// resources is every subscribed resource as things stand: mid-change during the add round.
+// resources is every subscribed resource as things stand. Mid-change, that's the add round's: what the change removes
+// stays until its type's remove round is sent, so nothing goes before what may refer to it.
 func (b *base[U, D]) resources(subscribed func(string) bool) []Resource {
 	if b.builder == nil {
 		return nil
 	}
 	var rs []Resource
-	if b.round == adding {
+	if b.round != idle {
 		rs = b.builder.ResourcesAddOrder(b.state, subscribed, b.details)
 	} else {
 		rs = b.builder.ResourcesRemoveOrder(b.state, subscribed, b.details)

@@ -42,8 +42,12 @@ To serve config from your own state instead, implement `xds.Source`, and an `xds
   `snapshot.Update` is. Mesh updates come in bursts, and pushing each to every Envoy is expensive.
 - **Phases.** To order changes make before break can't see, split an update with `Change.Then`: each Envoy gets, and
   ACKs, each phase before the next.
+- **Subscribing mid-change.** An Envoy that subscribes while a change is going out gets the change's add round: what
+  the change removes stays until its type's remove round. Routes and listeners wait until the change's clusters and
+  endpoints are sent and ACKed.
 - **A NACK freezes the stream.** A rejected change won't fix itself, so the Envoy is sent no more changes and keeps its
-  last good config. `Events.Nacked` tells you; `Client.Resync`, or `xds.ResyncAfterNack`, starts it afresh.
+  last good config. Its subscriptions are still answered, keeping what the change would remove, as those removals
+  never went out. `Events.Nacked` tells you; `Client.Resync`, or `xds.ResyncAfterNack`, starts it afresh.
 - **Reconnects.** What a delta Envoy kept over a reconnect, and is gone since, is removed in remove order, once the
   types that may refer to it are ACKed.
 
