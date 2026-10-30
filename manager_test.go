@@ -356,7 +356,7 @@ func (churning) RemoveOrder(u int, _ func(string) bool, _ string) xds.Response {
 func (churning) ResourcesAddOrder(int, func(string) bool, string) []xds.Resource    { return nil }
 func (churning) ResourcesRemoveOrder(int, func(string) bool, string) []xds.Resource { return nil }
 
-func TestARouteNackIsNeverHeld(t *testing.T) {
+func TestAHeldNackStillStopsTheChange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := newSource(cluster("a"), route("r", "a"))
 		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
@@ -369,6 +369,37 @@ func TestARouteNackIsNeverHeld(t *testing.T) {
 		e.nack(rds) // while the clusters await their ACK
 		if sent := e.ack(cds); len(sent) != 0 {
 			t.Fatalf("got %v after the NACK, want no more of the change", sent)
+		}
+	})
+}
+
+func TestARequestNeverOvertakesAHeldOneOfItsType(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(cluster("a"), cla("a", "10.0.0.1"), cla("b", "10.0.0.2"), listener("l"), route("r", "a"), route("s", "a"))
+		e := startDelta(t, newServer(t, src, xds.EnvoyConfig[string]{}, xds.Events[string]{}))
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		e.ack(e.subscribe(xds.EndpointType, "a")[0])
+		e.ack(e.subscribe(xds.ListenerType)[0])
+		e.ack(e.subscribe(xds.RouteType, "r")[0])
+
+		update(src, listener("m"), route("r", "b"))
+		lds := e.sent()[0]
+		eds := e.subscribe(xds.EndpointType, "b")[0] // so the clusters await an ACK
+		if sent := e.subscribe(xds.RouteType, "s"); len(sent) != 0 {
+			t.Fatalf("got %v while EDS isn't ACKed", sent)
+		}
+		rds := e.ack(lds)[0]
+		// Envoy changes its mind in the ACK of the change's routes, which mustn't be applied before the subscription.
+		e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.RouteType), ResponseNonce: rds.GetNonce(),
+			ResourceNamesUnsubscribe: []string{"s"}})
+		answer := e.ack(eds)
+		if len(answer) != 1 || !slices.Equal(deltaNames(answer[0]), []string{"s"}) {
+			t.Fatalf("got %v after the EDS ACK, want s", answer)
+		}
+		e.ack(answer[0])
+		update(src, route("s", "b"))
+		if sent := e.sent(); len(sent) != 0 {
+			t.Fatalf("got %v, want nothing: Envoy unsubscribed from s", sent)
 		}
 	})
 }
