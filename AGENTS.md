@@ -19,3 +19,6 @@ Modern, idiomatic Go. Use the standard library over a dependency wherever it doe
   changed lines, and all of them on main. An exception needs a strong reason, agreed with the maintainer.
 - The e2e module runs the conformance suite against real Envoys: `cd e2e && go test ./...`, which needs Docker. Never
   mock Envoy.
+- The spectest module runs the trace vectors from [envoy-xds-spec](https://github.com/JonathanO/envoy-xds-spec), the
+  submodule at `spec/`: `git submodule update --init`, then `cd spectest && go test ./...`. A behaviour change needs a
+  vector there, which fails without it.

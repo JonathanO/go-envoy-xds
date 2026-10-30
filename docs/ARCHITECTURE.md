@@ -428,6 +428,12 @@ as `node`.
   ([snapshot/makebeforebreak_test.go](../snapshot/makebeforebreak_test.go)) models what an Envoy holds while random
   changes go through groups and views, and checks after every response that what it serves from refers only to config
   it holds. Each runs a thousand or more seeded inputs under `go test`; `go test -fuzz` runs more.
+- **Trace vectors**. The `spectest` module runs every vector in
+  [envoy-xds-spec](https://github.com/JonathanO/envoy-xds-spec), the submodule at `spec/`, once per protocol, through
+  the real Server and package snapshot, with a fake Envoy stream per Envoy in the vector, inside a `testing/synctest`
+  bubble. Every port runs the same vectors, so they hold the ports to the same behaviour; the format is in the spec
+  repo's docs/VECTORS.md. It's a module of its own, as the module proxy leaves the submodule out. Clone with
+  `--recurse-submodules`, or run `git submodule update --init`.
 - **Mutation testing**. [gomutants](https://github.com/gomutants/gomutants) must kill every mutant, each package with
   its own tests. CI tests the mutants on a pull request's changed lines, and all of them on main.
 - **Conformance against real Envoys**. The `e2e` module runs the suite from

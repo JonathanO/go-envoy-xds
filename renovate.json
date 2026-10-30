@@ -3,5 +3,9 @@
   "extends": [
     "config:recommended"
   ],
+  "git-submodules": {
+    "description": "Bump the spec submodule, whose vectors spectest runs",
+    "enabled": true
+  },
   "postUpdateOptions": ["gomodTidy"]
 }
