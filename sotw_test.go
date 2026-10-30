@@ -308,9 +308,9 @@ func TestSotwAnswerWithAnotherVersionIsNotAnAck(t *testing.T) {
 			if sent := e.sent(); len(sent) != 0 {
 				t.Fatalf("answered with version %q: got %v, want c held until an ACK", version, sent)
 			}
-			logged := fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and rolled back" type=%s version=%s to=%s`, xds.ClusterType, push.GetVersionInfo(), version)
+			logged := fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and rolled back" node=envoy type=%s version=%s to=%s`, xds.ClusterType, push.GetVersionInfo(), version)
 			if version == "" {
-				logged = fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and has none to roll back to" type=%s version=%s`, xds.ClusterType, push.GetVersionInfo())
+				logged = fmt.Sprintf(`level=ERROR msg="Envoy rejected a version and has none to roll back to" node=envoy type=%s version=%s`, xds.ClusterType, push.GetVersionInfo())
 			}
 			if got := l.count(logged); got != 1 {
 				t.Fatalf("answered with version %q: logged %q", version, l.String())

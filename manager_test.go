@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -414,6 +415,30 @@ func TestARequestNeverOvertakesAHeldOneOfItsType(t *testing.T) {
 		update(src, route("s", "b"))
 		if sent := e.sent(); len(sent) != 0 {
 			t.Fatalf("got %v, want nothing: Envoy unsubscribed from s", sent)
+		}
+	})
+}
+
+func TestLogsSayWhichEnvoy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := &logs{}
+		e := startDelta(t, newServer(t, newSource(cluster("a"), route("r", "a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option))
+		e.ack(e.reconnect(xds.ClusterType, []string{"gone"})[0]) // its removal waits for the routes
+
+		time.Sleep(30 * time.Second)
+		removal := e.ack(e.subscribe(xds.RouteType, "r")[0]) // gives up waiting for listeners, so removes gone
+		if len(removal) != 1 {
+			t.Fatalf("got %v after the route ACK, want gone removed", removal)
+		}
+		e.nack(removal[0])
+		lines := strings.Split(strings.TrimSpace(l.String()), "\n")
+		if len(lines) < 2 {
+			t.Fatalf("logged %q, want the give-up and the NACK", lines)
+		}
+		for _, line := range lines {
+			if !strings.Contains(line, "node=envoy") {
+				t.Errorf("logged %q without the node", line)
+			}
 		}
 	})
 }
