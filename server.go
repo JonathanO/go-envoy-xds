@@ -22,7 +22,9 @@ type ServerConfig[U, D any] struct {
 	Source Source[U, D]
 	// Builders turn updates into resources, one per type served. Types with none have no resources.
 	Builders []ConfigBuilder[U, D]
-	// ConfigFor gives an Envoy's config from the node in its first request. An error ends the stream with it.
+	// ConfigFor gives an Envoy's config from the node in its first request. An error ends the stream. One with a gRPC
+	// status, from status.Error say, goes to Envoy as it is, so codes.InvalidArgument can reject a node. Any other is
+	// logged, and Envoy gets codes.Internal with the message "xds: internal error".
 	ConfigFor func(ctx context.Context, node *corev3.Node) (EnvoyConfig[D], error)
 	// Events are told what Envoys do.
 	Events Events[D]
@@ -167,7 +169,10 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 			log = srv.log.With("node", req.GetNode().GetId()) // before ConfigFor, so its failure says which Envoy
 			cfg, err := srv.configFor(ctx, req.GetNode())
 			if err != nil {
-				return err
+				if status.Code(err) != codes.Unknown { // a plain error is Unknown too
+					return err
+				}
+				return internalError{err}
 			}
 			client = &Client[D]{Node: req.GetNode(), Config: cfg, resync: func() { cancel(errResync) }}
 			if srv.events.Connected != nil {
@@ -211,6 +216,14 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 			}
 		}
 	}
+}
+
+// internalError sends Envoy codes.Internal, and keeps err to log, not to send.
+type internalError struct{ err error }
+
+func (e internalError) Error() string { return e.err.Error() }
+func (e internalError) GRPCStatus() *status.Status {
+	return status.New(codes.Internal, "xds: internal error")
 }
 
 // ended is what serve returns when the stream ends with err.
