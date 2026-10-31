@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // ServerConfig configures a Server: Source and ConfigFor are required.
@@ -91,7 +92,7 @@ func (s *Server[U, D]) DeltaAggregatedResources(stream grpc.BidiStreamingServer[
 				subs = &deltaWildcard{}
 			}
 			svc := &deltaService[U, D]{base: s.base(t, cfg, log), send: send, fail: fail, subs: subs,
-				answeredDuringChange: set{}}
+				answeredDuringChange: map[string]proto.Message{}}
 			svc.deferred = set{} // only delta has stale names to defer
 			services[t] = svc
 		}
