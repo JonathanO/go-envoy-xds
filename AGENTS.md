@@ -17,8 +17,8 @@ Modern, idiomatic Go. Use the standard library over a dependency wherever it doe
 - `gofmt -l .` prints nothing, and `go vet ./...` and `go test -race ./...` pass.
 - `gomutants ./...` must kill every mutant, each package with its own tests. CI tests the mutants on a pull request's
   changed lines, and all of them on main. An exception needs a strong reason, agreed with the maintainer.
-- The e2e module runs the conformance suite against real Envoys: `cd e2e && go test ./...`, which needs Docker. Never
-  mock Envoy.
+- The e2e module is the conformance server, which the spec's harness runs the conformance suite against, on real
+  Envoys: `cd e2e && go build -o /tmp/conformance-server . && cd ../spec/conformance && ./gradlew conformance -Pserver=/tmp/conformance-server`, which needs Docker and JDK 21 or later. Never mock Envoy.
 - The spectest module runs the trace vectors from [envoy-xds-spec](https://github.com/JonathanO/envoy-xds-spec), the
   submodule at `spec/`: `git submodule update --init`, then `cd spectest && go test ./...`. A behaviour change needs a
   vector there, which fails without it.
