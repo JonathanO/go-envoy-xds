@@ -279,12 +279,14 @@ func TestMetricsFollowPushesAndAcks(t *testing.T) {
 		}
 		e.ack(eds)
 		update(src, cluster("c"), route("r", "c"))
-		e.nack(e.sent()[0])
+		rejected := e.sent()[0]
+		e.nack(rejected)
+		e.nack(rejected) // frozen once only
 		e.end()
 		synctest.Wait()
 
 		want := []string{"awaiting", "acked", "awaiting", "acked", "awaiting", "acked", "awaiting", "acked",
-			"began", "completed", "began", "completed", "closed"}
+			"began", "completed", "began", "completed", "frozen", "closed"}
 		if !slices.Equal(m.calls, want) {
 			t.Fatalf("got %v,\nwant %v", m.calls, want)
 		}

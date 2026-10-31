@@ -94,6 +94,7 @@ func (m *metrics) PushBegan()             { m.calls = append(m.calls, "began") }
 func (m *metrics) PushCompleted()         { m.calls = append(m.calls, "completed") }
 func (m *metrics) AwaitingAck()           { m.calls = append(m.calls, "awaiting") }
 func (m *metrics) Acked()                 { m.calls = append(m.calls, "acked") }
+func (m *metrics) Frozen()                { m.calls = append(m.calls, "frozen") }
 func (m *metrics) Closed()                { m.calls = append(m.calls, "closed") }
 
 // watched is a Source that counts the subscriptions to it that have been cancelled.

@@ -208,6 +208,9 @@ func (m *manager[R, U]) updateOutstanding(s service[R, U]) {
 // answer is the whole set: resending it changes nothing Envoy has, where rolling it back would undo any part of it
 // Envoy took.
 func (m *manager[R, U]) freeze() {
+	if m.frozen {
+		return
+	}
 	m.frozen = true
 	m.unsubscribe()
 	if m.pushing {
@@ -218,6 +221,7 @@ func (m *manager[R, U]) freeze() {
 		}
 		m.metrics.PushCompleted()
 	}
+	m.metrics.Frozen()
 }
 
 func (m *manager[R, U]) waitedTooLong() bool { return time.Since(m.started) >= waitForAck }
