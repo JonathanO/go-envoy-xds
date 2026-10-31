@@ -252,7 +252,9 @@ func (c *Change[G, V]) last() *phase[G, V] { return c.phases[len(c.phases)-1] }
 //
 // Only Envoys whose view changes in a later phase wait. An Envoy connecting meanwhile gets the end result.
 func (c *Change[G, V]) Then() {
-	c.phases = append(c.phases, newPhase[G, V]()) // an empty one changes no view, so costs nothing
+	if p := c.last(); len(p.groups) > 0 || len(p.views) > 0 { // one that only sets views is still a phase
+		c.phases = append(c.phases, newPhase[G, V]())
+	}
 }
 
 // EditGroup edits a group, creating it if there's none. Only the names edit touches are compared.
