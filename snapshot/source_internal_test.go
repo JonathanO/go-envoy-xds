@@ -173,3 +173,19 @@ func TestThousandsOfEnvoysAllCatchUpInOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestThenStartsAPhaseOnlyIfThisOneHasEdits(t *testing.T) {
+	c := &Change[string, string]{phases: []*phase[string, string]{newPhase[string, string]()}}
+	c.Then()
+	if len(c.phases) != 1 {
+		t.Fatalf("%d phases after Then with no edits, want 1", len(c.phases))
+	}
+	c.SetView("v", "g")
+	c.Then()
+	c.Then()
+	c.EditGroup("g", func(*Editor) {})
+	c.Then()
+	if len(c.phases) != 3 {
+		t.Fatalf("%d phases, want one for the view, one for the group, and the one started after", len(c.phases))
+	}
+}

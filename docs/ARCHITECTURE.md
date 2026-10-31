@@ -147,8 +147,11 @@ meanwhile as one change, not a queue of them, each needing its own ACKs.
 
 ### The push rounds
 
-`pushAllowedWork` starts a push when nothing blocks it: the stream isn't frozen, no answer is awaiting an ACK, no
-stale removals are due (see [Reconnects](#7-reconnects)), and `DelayUpdatesUntilAckOf` isn't holding updates. It takes
+`pushAllowedWork` starts a push when nothing blocks it: the stream isn't frozen, no answer is awaiting an ACK, and no
+request is held (see [Route requests wait for clusters](#route-requests-wait-for-clusters)): a held request may be the
+first of its type, and a push skips a type Envoy hasn't asked for, though a reconnecting Envoy has some of it. Then it
+sends the stale removals that may go (see [Reconnects](#7-reconnects)): if it sent any, the push waits for their ACK,
+but removals that may not go yet don't hold it up. Last, `DelayUpdatesUntilAckOf` mustn't be holding updates. It takes
 the next update from the mailbox, calls `Metrics.PushBegan`, and *stages* it on every service: the update becomes the
 service's state, and its round becomes `adding`.
 
