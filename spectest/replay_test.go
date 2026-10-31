@@ -151,11 +151,12 @@ func TestReplayPrintsWhatEachEnvoyGotLeavingOutAnAckOfNoResponse(t *testing.T) {
 	got := replayed(t, `{"name": "v", "protocols": ["sotw", "delta"], "serves": ["CDS"], "envoys": [{"name": "e", "view": "v"}], "steps": [
 		{"update": [{"setView": "v", "groups": ["g"]}, {"editGroup": "g", "put": {"CDS": [{"name": "a"}]}}]},
 		{"request": "CDS", "ack": "last", "expect": [{"type": "CDS", "resources": [{"name": "wrong"}]}]},
-		{"request": "CDS", "ack": "last"}]}`)
+		{"request": "CDS", "ack": "last"},
+		{"request": "CDS", "nack": "last-1"}]}`)
 
 	want := `{"name": "v", "runs": {
-		"sotw": {"steps": [[], [{"envoy": "e", "type": "CDS", "resources": [{"name": "a"}]}], []]},
-		"delta": {"steps": [[], [{"envoy": "e", "type": "CDS", "resources": [{"name": "a"}], "removed": []}], []]}}}`
+		"sotw": {"steps": [[], [{"envoy": "e", "type": "CDS", "resources": [{"name": "a"}]}], [], []]},
+		"delta": {"steps": [[], [{"envoy": "e", "type": "CDS", "resources": [{"name": "a"}], "removed": []}], [], []]}}}`
 	if canonical(t, got) != canonical(t, want) {
 		t.Errorf("got %s\nwant %s", canonical(t, got), canonical(t, want))
 	}

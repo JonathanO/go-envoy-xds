@@ -26,10 +26,10 @@ type conn struct {
 	ended     chan error // what the Server's handler returned
 	closing   bool       // the Envoy closed its side
 
-	first bool                      // its next request is its first
-	last  map[xds.TypeURL]*received // the last response of each type
-	acked map[xds.TypeURL]string    // SotW: the version last ACKed of each type
-	names map[xds.TypeURL][]string  // SotW: the names wanted of each type
+	first bool                        // its next request is its first
+	got   map[xds.TypeURL][]*received // the responses of each type, in order
+	acked map[xds.TypeURL]string      // SotW: the version last ACKed of each type
+	names map[xds.TypeURL][]string    // SotW: the names wanted of each type
 }
 
 // A received response, as a vector compares it, with what a request needs to answer it.
@@ -41,7 +41,7 @@ type received struct {
 func dial[Req, Resp any](ctx context.Context, serve func(grpc.BidiStreamingServer[Req, Resp]) error,
 	convert func(*Resp) (*received, error)) *conn {
 	s := &stream[Req, Resp]{ctx: ctx, reqs: make(chan *Req)}
-	c := &conn{ended: make(chan error, 1), first: true, last: map[xds.TypeURL]*received{},
+	c := &conn{ended: make(chan error, 1), first: true, got: map[xds.TypeURL][]*received{},
 		acked: map[xds.TypeURL]string{}, names: map[xds.TypeURL][]string{}}
 	go func() { c.ended <- serve(s) }()
 	c.send = func(m proto.Message) error {
@@ -65,12 +65,21 @@ func dial[Req, Resp any](ctx context.Context, serve func(grpc.BidiStreamingServe
 				return nil, err
 			}
 			rs = append(rs, r)
-			c.last[r.typ] = r
+			c.got[r.typ] = append(c.got[r.typ], r)
 		}
 		return rs, nil
 	}
 	c.closeSend = func() { close(s.reqs) }
 	return c
+}
+
+// back is the response of a type n before the last on the stream, or nil if there isn't one.
+func (c *conn) back(typ xds.TypeURL, n int) *received {
+	got := c.got[typ]
+	if n >= len(got) {
+		return nil
+	}
+	return got[len(got)-1-n]
 }
 
 func sotwReceived(r *discoveryv3.DiscoveryResponse) (*received, error) {
