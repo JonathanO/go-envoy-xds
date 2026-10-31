@@ -60,6 +60,7 @@ func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(stri
 	for _, r := range rs {
 		delete(removed, r.Name)
 		delete(stale, r.Name)
+		delete(s.deferred, r.Name) // answered, so not gone
 	}
 	if s.round == adding {
 		for _, r := range rs {

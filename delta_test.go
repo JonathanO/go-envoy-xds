@@ -491,6 +491,29 @@ func TestDeltaStaleRemovalsGoInRemoveOrderEachOnceTheLastIsAcked(t *testing.T) {
 	})
 }
 
+func TestDeltaStaleNameAnsweredSinceIsNotRemovedAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource(route("r", "x"))
+		cfg := xds.EnvoyConfig[string]{SubscribesTo: []xds.TypeURL{xds.ClusterType, xds.RouteType}}
+		e := startDelta(t, newServer(t, src, cfg, xds.Events[string]{}))
+		e.ack(e.reconnect(xds.ClusterType, []string{"a"}, "a")[0]) // a is gone, and its removal waits for the routes
+		update(src, cluster("a"))
+		e.ack(e.sent()[0])
+		e.ack(e.subscribe(xds.ClusterType, "a")[0]) // answered with a, so its removal is no longer due
+
+		edit(src, func(ed *snapshot.Editor) { ed.Remove(xds.ClusterType, "a") })
+		removal := e.sent()
+		if len(removal) != 1 || !slices.Equal(removal[0].GetRemovedResources(), []string{"a"}) {
+			t.Fatalf("got %v, want a removed", removal)
+		}
+		e.ack(removal[0])
+		rds := e.subscribe(xds.RouteType, "r")[0]
+		if sent := e.ack(rds); len(sent) != 0 {
+			t.Fatalf("got %v after the route ACK, want a removed only once", sent)
+		}
+	})
+}
+
 func TestDeltaResourcesHaveTheVersionOfTheirResponse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e := startDelta(t, newServer(t, newSource(cla("a", "10.0.0.1")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
