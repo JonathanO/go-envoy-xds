@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -17,9 +18,9 @@ type deltaService[U, D any] struct {
 
 	unanswered    string // nonce of the response Envoy hasn't answered, or ""
 	deferRemovals func() bool
-	// Names subscriptions were answered with while the staged change waited its turn. They were answered from the
-	// change, so it needn't send them again.
-	answeredDuringChange set
+	// What subscriptions were answered with while the staged change waited its turn, by name. They were answered from
+	// the change, so it needn't send them again, unless its add round has something else for a name.
+	answeredDuringChange map[string]proto.Message
 }
 
 func (s *deltaService[U, D]) process(req *discoveryv3.DeltaDiscoveryRequest) error {
@@ -64,7 +65,7 @@ func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(stri
 	}
 	if s.round == adding {
 		for _, r := range rs {
-			s.answeredDuringChange[r.Name] = struct{}{}
+			s.answeredDuringChange[r.Name] = r.Message
 		}
 	}
 	if len(stale) > 0 && s.deferRemovals() { // asking may give up waiting, and warn
@@ -79,7 +80,9 @@ func (s *deltaService[U, D]) sendAdds()    { s.pushChange(s.adds(s.subs.subscrib
 func (s *deltaService[U, D]) sendRemoves() { s.pushChange(s.removes(s.subs.subscribed)) }
 
 func (s *deltaService[U, D]) pushChange(r Response) {
-	updates := slices.DeleteFunc(slices.Clone(r.Updates), func(u Resource) bool { return s.answeredDuringChange.has(u.Name) })
+	updates := slices.DeleteFunc(slices.Clone(r.Updates), func(u Resource) bool {
+		return proto.Equal(u.Message, s.answeredDuringChange[u.Name])
+	})
 	clear(s.answeredDuringChange)
 	if len(updates) > 0 || len(r.Removes) > 0 {
 		s.push(updates, r.Removes)
