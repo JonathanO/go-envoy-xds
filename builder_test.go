@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -137,6 +138,71 @@ func TestDeltaChangeSendsWhatASubscriptionWasAnsweredWithOtherwise(t *testing.T)
 		eds := e.ack(cds)
 		if len(eds) != 1 || len(eds[0].GetResources()) != 1 || address(t, eds[0].GetResources()[0].GetResource()) != "10.0.0.2" {
 			t.Fatalf("got %v after the cluster ACK, want b's endpoints as the change has them", eds)
+		}
+	})
+}
+
+// reversed serves clusters b and a, in that order, from every call, whether or not anything changed.
+type reversed struct{}
+
+func (reversed) Type() xds.TypeURL { return xds.ClusterType }
+func (reversed) AddOrder(int, func(string) bool, string) xds.Response {
+	return xds.Response{Updates: reversed{}.ResourcesAddOrder(0, nil, "")}
+}
+func (reversed) RemoveOrder(int, func(string) bool, string) xds.Response { return xds.Response{} }
+func (reversed) ResourcesAddOrder(int, func(string) bool, string) []xds.Resource {
+	return []xds.Resource{{Name: "b", Message: cluster("b")}, {Name: "a", Message: cluster("a")}}
+}
+func (reversed) ResourcesRemoveOrder(u int, s func(string) bool, d string) []xds.Resource {
+	return reversed{}.ResourcesAddOrder(u, s, d)
+}
+
+func reversedServer(t *testing.T, src *counter) *xds.Server[int, string] {
+	t.Helper()
+	srv, err := xds.NewServer(xds.ServerConfig[int, string]{
+		Source:   src,
+		Builders: []xds.ConfigBuilder[int, string]{reversed{}},
+		ConfigFor: func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+			return xds.EnvoyConfig[string]{}, nil
+		},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+// The Server doesn't compare updates: what to send is the builders' call.
+func TestAnUpdateEqualToTheLastStillGoesThroughTheBuilders(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &counter{}
+		e := &deltaEnvoy{start(t, reversedServer(t, src).DeltaAggregatedResources)}
+		e.ack(e.subscribe(xds.ClusterType)[0])
+		for range 2 {
+			src.deliver(0) // as Subscribe gave
+			sent := e.sent()
+			if len(sent) != 1 || !slices.Equal(deltaNames(sent[0]), []string{"b", "a"}) {
+				t.Fatalf("got %v, want what the builder sent again", sent)
+			}
+			e.ack(sent[0])
+		}
+	})
+}
+
+func TestSotwListsResourcesByName(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &counter{}
+		e := &sotwEnvoy{start(t, reversedServer(t, src).StreamAggregatedResources)}
+		answer := e.request(xds.ClusterType, nil)
+		if len(answer) != 1 || !slices.Equal(names(t, answer[0]), []string{"a", "b"}) {
+			t.Fatalf("answered %v, want a then b", answer)
+		}
+		e.request(xds.ClusterType, answer[0])
+		src.deliver(1)
+		push := e.sent()
+		if len(push) != 1 || !slices.Equal(names(t, push[0]), []string{"a", "b"}) {
+			t.Fatalf("pushed %v, want a then b", push)
 		}
 	})
 }

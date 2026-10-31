@@ -155,7 +155,9 @@ it, so prefer `EditGroup` for small changes to big groups. `RemoveGroup` removes
 ## 3. Per-Envoy config
 
 `ServerConfig.ConfigFor` is called once per stream, with the node from Envoy's first request. It returns the
-`EnvoyConfig` for that stream. An error ends the stream, and Envoy retries.
+`EnvoyConfig` for that stream. An error ends the stream, and Envoy retries. An error with a gRPC status, from
+`status.Error` say, goes to Envoy as it is, so `codes.InvalidArgument` can reject a node, as below. Any other error is
+logged as a warning, and Envoy gets `codes.Internal` with the message "xds: internal error", as it does for a panic.
 
 `EnvoyConfig.Details` is a value of any type you choose, the `D` type parameter. The Server passes it to
 `Source.Subscribe` and to every ConfigBuilder call for that Envoy. Package snapshot passes it to the `viewOf` func

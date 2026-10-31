@@ -142,7 +142,7 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 			var sent []string
 			switch r := any(r).(type) {
 			case *discoveryv3.DiscoveryResponse:
-				// Go's SotW lists resources by name, where Java's keeps them in the order they came.
+				// SotW lists resources by name.
 				if sent = names(t, r); !slices.IsSorted(sent) {
 					t.Fatalf("resources out of order: %v", sent)
 				}

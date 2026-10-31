@@ -80,22 +80,35 @@ func TestTheSourceIsSubscribedToWithTheEnvoysDetails(t *testing.T) {
 	})
 }
 
+// An error with a status reaches Envoy as it is. Any other is ours, so Envoy gets Internal, and only the log has it.
 func TestAnErrorFromConfigForEndsTheStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		denied, l := errors.New("denied"), &logs{}
-		e := startSotw(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option, func(c *serverConfig) {
-			c.ConfigFor = func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
-				return xds.EnvoyConfig[string]{}, denied
-			}
-		}))
-		e.stream.reqs <- &discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType)}
-		if err := <-e.ended; !errors.Is(err, denied) {
-			t.Fatalf("got %v", err)
-		}
-		if got := l.count(`level=WARN msg="Error streaming to an ADS client" node=envoy error=denied`); got != 1 {
-			t.Fatalf("logged %q", l.String())
-		}
-	})
+	internal := status.New(codes.Internal, "xds: internal error")
+	for name, tc := range map[string]struct {
+		err  error
+		want *status.Status
+	}{
+		"plain":          {errors.New("denied"), internal},
+		"unknown status": {status.Error(codes.Unknown, "denied"), internal},
+		"status":         {status.Error(codes.InvalidArgument, "denied"), status.New(codes.InvalidArgument, "denied")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				l := &logs{}
+				e := startSotw(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}, l.option, func(c *serverConfig) {
+					c.ConfigFor = func(context.Context, *corev3.Node) (xds.EnvoyConfig[string], error) {
+						return xds.EnvoyConfig[string]{}, tc.err
+					}
+				}))
+				e.stream.reqs <- &discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType)}
+				if got := status.Convert(<-e.ended); got.Code() != tc.want.Code() || got.Message() != tc.want.Message() {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+				if l.count(`level=WARN msg="Error streaming to an ADS client" node=envoy error=`) != 1 || l.count("denied") != 1 {
+					t.Fatalf("logged %q", l.String())
+				}
+			})
+		})
+	}
 }
 
 func TestAResyncIsLogged(t *testing.T) {
