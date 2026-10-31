@@ -13,7 +13,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -35,6 +37,9 @@ import (
 )
 
 const vectors = "../spec/vectors"
+
+// last matches a reference to a response relative to the last of its type: "last", or "last-1" for the one before it.
+var last = regexp.MustCompile(`^last(?:-([0-9]+))?$`)
 
 func TestVectors(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(vectors, "*.json"))
@@ -409,11 +414,14 @@ func (r *run) request(s step) error {
 	c := e.conn
 	var answering *received
 	if ref := cmp.Or(s.Ack, s.Nack); ref != "" {
-		answering = c.last[typ]
-		if ref != "last" {
+		relative := last.FindStringSubmatch(ref)
+		if relative != nil {
+			n, _ := strconv.Atoi(cmp.Or(relative[1], "0"))
+			answering = c.back(typ, n)
+		} else {
 			answering = r.labels[ref]
 		}
-		if answering == nil && r.replaying && ref == "last" {
+		if answering == nil && r.replaying && relative != nil {
 			s.Ack, s.Nack = "", "" // replaying, an answer to no response is left out
 		} else if answering == nil {
 			return fmt.Errorf("no response %s of %s to answer", ref, s.Request)
@@ -458,7 +466,7 @@ func (r *run) request(s step) error {
 	c.names[typ] = names
 	req := &discoveryv3.DiscoveryRequest{Node: node, TypeUrl: string(typ), ResourceNames: slices.Clone(names), ErrorDetail: detail}
 	// Each request answers the last response of its type, unless the step says which, as Envoy does.
-	if answers := cmp.Or(answering, c.last[typ]); answers != nil {
+	if answers := cmp.Or(answering, c.back(typ, 0)); answers != nil {
 		req.ResponseNonce = answers.nonce
 	}
 	if s.Ack != "" {
@@ -518,6 +526,9 @@ func (r *run) check(s step) error {
 			for i, resp := range want[e] {
 				if resp.As == "" {
 					continue
+				}
+				if last.MatchString(resp.As) {
+					return fmt.Errorf("label %s means a response relative to the last", resp.As)
 				}
 				if _, dup := r.labels[resp.As]; dup {
 					return fmt.Errorf("label %s is used twice", resp.As)
