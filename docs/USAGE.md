@@ -267,14 +267,15 @@ return xds.EnvoyConfig[string]{
 - **`SubscribesTo`** is the types this Envoy gets from you, or nil for every type you serve. When a delta Envoy
   reconnects, it says what it kept, and what's gone since must be removed. A cluster is only removed once the types
   that may refer to it (listeners, routes, and so on) have been answered and ACKed. Leave out types the Envoy doesn't
-  use, e.g. RouteType for an Envoy with static routes, or those removals wait for them, up to 30 seconds.
+  use, e.g. RouteType for an Envoy with static routes, or those removals wait for them, for 30 seconds or more.
 - **`DelayUpdatesUntilAckOf`** holds changes until this Envoy first ACKs that type. RouteType is the usual one: Envoy
   ACKs routes only once its clusters have initialised, and endpoint changes meanwhile get in the way of that
   ([envoy#16035](https://github.com/envoyproxy/envoy/issues/16035)). Only set it to a type the Envoy subscribes to.
   If `SubscribesTo` leaves the type out, it's ignored, with a warning. With no ACK after 30 seconds, changes go
   anyway.
 
-Both 30-second waits are checked when something happens on the stream, a request or an update, not on a timer.
+Both 30-second waits are checked only when something happens on the stream, a request or an update, not on a timer,
+so either can last longer.
 
 ## 6. Phases
 
