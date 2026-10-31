@@ -247,6 +247,9 @@ func newRun(ctx context.Context, v *vector, protocol string) (*run, error) {
 	for _, e := range v.Envoys {
 		views[e.Name] = e.View
 		cfg := xds.EnvoyConfig[string]{Details: e.Name}
+		if e.SubscribesTo != nil {
+			cfg.SubscribesTo = []xds.TypeURL{} // empty means no type, where nil means every type served
+		}
 		for _, name := range e.SubscribesTo {
 			typ, err := typeURL(name)
 			if err != nil {
