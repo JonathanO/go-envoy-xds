@@ -436,7 +436,8 @@ as `node`.
   the real Server and package snapshot, with a fake Envoy stream per Envoy in the vector, inside a `testing/synctest`
   bubble. Every port runs the same vectors, so they hold the ports to the same behaviour; the format is in the spec
   repo's docs/VECTORS.md. It's a module of its own, as the module proxy leaves the submodule out. Clone with
-  `--recurse-submodules`, or run `git submodule update --init`.
+  `--recurse-submodules`, or run `git submodule update --init`. `spectest/replay` runs it in replay mode, for the
+  spec's differential fuzzer: it prints what each Envoy got, as the spec repo's docs/REPLAY.md says.
 - **Mutation testing**. [gomutants](https://github.com/gomutants/gomutants) must kill every mutant, each package with
   its own tests. CI tests the mutants on a pull request's changed lines, and all of them on main.
 - **Conformance against real Envoys**. The conformance suite in the spec submodule

@@ -207,19 +207,41 @@ func nameOf(m proto.Message) string {
 
 // run is one vector on one protocol.
 type run struct {
-	delta  bool
-	ctx    context.Context
-	src    *snapshot.Source[string, string, string]
-	srv    *xds.Server[*snapshot.Update, string]
-	envoys []*envoy
-	labels map[string]*received
+	delta     bool
+	replaying bool // as spec/docs/REPLAY.md says: an ACK or NACK of "last" with no such response is left out
+	ctx       context.Context
+	src       *snapshot.Source[string, string, string]
+	srv       *xds.Server[*snapshot.Update, string]
+	envoys    []*envoy
+	labels    map[string]*received
 }
 
 func runVector(t *testing.T, v *vector, protocol string) {
-	if protocol != "sotw" && protocol != "delta" {
-		t.Fatalf("unknown protocol %q", protocol)
+	r, err := newRun(t.Context(), v, protocol)
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := &run{delta: protocol == "delta", ctx: t.Context(), labels: map[string]*received{}}
+	for i, s := range v.Steps {
+		shown := s
+		shown.Expect = nil
+		js, _ := json.Marshal(shown)
+		where := fmt.Sprintf("%s [%s], step %d: %s", v.Name, protocol, i+1, js)
+		if err := r.perform(s); err != nil {
+			t.Fatalf("%s\n%v", where, err)
+		}
+		synctest.Wait() // every response to the step has been sent
+		if err := r.check(s); err != nil {
+			t.Fatalf("%s\n%v", where, err)
+		}
+	}
+}
+
+// newRun makes the Source and the Server for a vector, and its Envoys.
+func newRun(ctx context.Context, v *vector, protocol string) (*run, error) {
+	if protocol != "sotw" && protocol != "delta" {
+		return nil, fmt.Errorf("unknown protocol %q", protocol)
+	}
+	r := &run{delta: protocol == "delta", ctx: ctx, labels: map[string]*received{}}
 	views := map[string]string{}
 	configs := map[string]xds.EnvoyConfig[string]{}
 	for _, e := range v.Envoys {
@@ -228,14 +250,14 @@ func runVector(t *testing.T, v *vector, protocol string) {
 		for _, name := range e.SubscribesTo {
 			typ, err := typeURL(name)
 			if err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
 			cfg.SubscribesTo = append(cfg.SubscribesTo, typ)
 		}
 		if e.DelayUpdatesUntilAckOf != "" {
 			typ, err := typeURL(e.DelayUpdatesUntilAckOf)
 			if err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
 			cfg.DelayUpdatesUntilAckOf = typ
 		}
@@ -246,7 +268,7 @@ func runVector(t *testing.T, v *vector, protocol string) {
 	for _, name := range v.Serves {
 		typ, err := typeURL(name)
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		served = append(served, typ)
 	}
@@ -264,23 +286,10 @@ func runVector(t *testing.T, v *vector, protocol string) {
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	r.srv = srv
-
-	for i, s := range v.Steps {
-		shown := s
-		shown.Expect = nil
-		js, _ := json.Marshal(shown)
-		where := fmt.Sprintf("%s [%s], step %d: %s", v.Name, protocol, i+1, js)
-		if err := r.perform(s); err != nil {
-			t.Fatalf("%s\n%v", where, err)
-		}
-		synctest.Wait() // every response to the step has been sent
-		if err := r.check(s); err != nil {
-			t.Fatalf("%s\n%v", where, err)
-		}
-	}
+	return r, nil
 }
 
 func (r *run) perform(s step) error {
@@ -401,10 +410,11 @@ func (r *run) request(s step) error {
 		if ref != "last" {
 			answering = r.labels[ref]
 		}
-		if answering == nil {
+		if answering == nil && r.replaying && ref == "last" {
+			s.Ack, s.Nack = "", "" // replaying, an answer to no response is left out
+		} else if answering == nil {
 			return fmt.Errorf("no response %s of %s to answer", ref, s.Request)
-		}
-		if answering.typ != typ {
+		} else if answering.typ != typ {
 			return fmt.Errorf("%s is a %s response, not %s", ref, typeName(answering.typ), s.Request)
 		}
 	}
