@@ -1,0 +1,8 @@
+#!/bin/sh
+# Replay mode, for the spec's differential fuzzer: reads vectors from stdin, one per line, and prints what each Envoy
+# got. See spec/docs/REPLAY.md.
+set -e
+cd "$(dirname "$0")"
+bin="${TMPDIR:-/tmp}/go-envoy-xds-replay.test"
+go test -c -o "$bin" . >&2
+exec "$bin" -test.run '^TestReplay$' -replay
