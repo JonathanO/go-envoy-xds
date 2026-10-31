@@ -447,15 +447,8 @@ as `node`.
 
 - **Versions and nonces.** Each type's version counts up from 1, on both protocols, and the nonce is the version.
   Java's SotW versions start at 2, and its nonces are random UUIDs.
-- **SotW responses are sorted by name.** Java keeps resources in the order they came.
-- **A NACK unsubscribes from the Source.** A frozen stream will never push again, so Go stops taking updates. Java
-  stays subscribed and drops what arrives.
-- **Updates equal to the last are pushed.** The Server doesn't compare updates, so each one delivered goes through the
-  builders, which find nothing changed. Java's services skip an update equal to their current state.
-- **`Editor.Build` drops empty types.** A type whose last resource was removed isn't in the new snapshot's `Types`.
-  Java keeps it, empty.
-- **`Change.Then` always adds a phase.** Java adds one only if the current phase has edits. An empty phase changes no
-  view, so the result is the same.
+- **SotW sorts names by their UTF-8 bytes.** Java sorts by UTF-16 code units, its string order. They differ only for
+  a name with characters above U+FFFF.
 - **A goroutine per stream, not a shared executor.** Java runs every stream on a shared executor and hands Source
   updates to it. Go's snapshot Source delivers on the publisher's goroutine, into a mailbox that never blocks, and
   each stream's own goroutine does the work.
