@@ -57,6 +57,11 @@ discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, srv)
 ## Testing
 
 `go test ./...` runs the unit tests. Each package's own tests kill every mutant [gomutants](https://github.com/gomutants/gomutants)
-makes of it, and CI keeps it that way: `gomutants ./...`. The `e2e` module runs the conformance suite from
-[envoy-xds-testing-go](https://github.com/JonathanO/envoy-xds-testing-go) against real Envoys, 1.36 to 1.40, over both
-protocols. It needs Docker: `cd e2e && go test ./...`, with `ENVOY_VERSIONS=1.40` to pick versions.
+makes of it, and CI keeps it that way: `gomutants ./...`. The conformance suite in
+[envoy-xds-spec](https://github.com/JonathanO/envoy-xds-spec), the submodule at `spec/`, runs against real Envoys, 1.36
+to 1.40, over both protocols, through the conformance server in the `e2e` module. It needs Docker and JDK 21 or later:
+
+```sh
+cd e2e && go build -o /tmp/conformance-server .
+cd ../spec/conformance && ./gradlew conformance -Pserver=/tmp/conformance-server -PenvoyVersions=1.40
+```

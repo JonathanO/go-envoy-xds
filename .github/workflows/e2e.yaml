@@ -6,7 +6,8 @@ on:
     branches:
       - main
 
-# The xDS conformance suite, against real Envoys: every release upstream supports.
+# The xDS conformance suite, against real Envoys: every release upstream supports. The suite is the spec's harness
+# (spec/conformance), driving the conformance server in e2e/.
 jobs:
   e2e:
     name: "E2E (Envoy ${{ matrix.envoy }})"
@@ -19,12 +20,36 @@ jobs:
         envoy: ["1.36", "1.37", "1.38", "1.39", "1.40"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true # spec/, whose conformance/ is the harness
       - uses: actions/setup-go@v6
         with:
           go-version-file: e2e/go.mod
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
       - run: go vet ./...
         working-directory: e2e
-      - run: go test -timeout 30m ./...
+      - run: go test -race ./...
         working-directory: e2e
-        env:
-          ENVOY_VERSIONS: ${{ matrix.envoy }}
+      - name: "Build the conformance server"
+        run: go build -o "$RUNNER_TEMP/conformance-server" .
+        working-directory: e2e
+      - name: "Run the conformance suite"
+        # Four tests at a time, each with its own Envoy, to fit the runner's four vCPUs.
+        run: ./gradlew conformance -Pserver="$RUNNER_TEMP/conformance-server" -PenvoyVersions=${{ matrix.envoy }} --console=plain
+        working-directory: spec/conformance
+      - name: "Upload test results"
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-envoy-${{ matrix.envoy }}
+          path: spec/conformance/build/test-results/
+      - name: "Upload reports"
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports-envoy-${{ matrix.envoy }}
+          path: spec/conformance/build/reports/

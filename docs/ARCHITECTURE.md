@@ -398,8 +398,8 @@ loop calls it:
   their ACK.
 - `Closed` when the stream ends.
 
-So a stream is idle when no push is under way and every `AwaitingAck` has had its `Acked`. The e2e control plane uses
-that to tell the conformance suite when a stream is idle.
+So a stream is idle when no push is under way and every `AwaitingAck` has had its `Acked`. The conformance server
+in `e2e/` uses that to tell the conformance suite when a stream is idle.
 
 `Events` (`Connected`, `Disconnected`, `Nacked`) are called on the serve loop, which waits for them. See
 [A stream's life](#3-a-streams-life) for when.
@@ -436,9 +436,9 @@ as `node`.
   `--recurse-submodules`, or run `git submodule update --init`.
 - **Mutation testing**. [gomutants](https://github.com/gomutants/gomutants) must kill every mutant, each package with
   its own tests. CI tests the mutants on a pull request's changed lines, and all of them on main.
-- **Conformance against real Envoys**. The `e2e` module runs the suite from
-  [envoy-xds-testing-go](https://github.com/JonathanO/envoy-xds-testing-go) through package snapshot, on Envoy 1.36
-  to 1.40, over both protocols, in Docker. Envoy is never mocked.
+- **Conformance against real Envoys**. The conformance suite in the spec submodule
+  (`spec/conformance`, a Java harness every port runs) drives the conformance server in the `e2e` module, which
+  serves through package snapshot, on Envoy 1.36 to 1.40, over both protocols, in Docker. Envoy is never mocked.
 
 ## 12. Differences from java-envoy-xds, on purpose
 

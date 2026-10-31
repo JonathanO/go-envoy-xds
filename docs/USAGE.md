@@ -425,8 +425,9 @@ Its [README](https://github.com/JonathanO/envoy-xds-testing-go#testing-your-cont
 waiting for the initial sync, making a change, and checking it with a `Checkpoint`. If your Metrics can tell when a
 stream is idle, as in [section 8](#8-events-metrics-and-logging), wait with `xdstest.SettledIdle`.
 
-The same module has a conformance suite, `conformance.Run`, which this library runs in [e2e/](../e2e) against Envoy
-1.36 to 1.40. [e2e/conformance_test.go](../e2e/conformance_test.go) shows a snapshot control plane wired into it.
+This library's own conformance suite against real Envoys is the one every envoy-xds port runs, in
+[envoy-xds-spec](https://github.com/JonathanO/envoy-xds-spec)'s `conformance/`. It drives a conformance server, which
+for this library is [e2e/](../e2e): a snapshot control plane, with a small HTTP API for the suite to change its config.
 
 ## 11. Examples
 
