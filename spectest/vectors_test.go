@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -40,6 +41,9 @@ const vectors = "../spec/vectors"
 
 // last matches a reference to a response relative to the last of its type: "last", or "last-1" for the one before it.
 var last = regexp.MustCompile(`^last(?:-([0-9]+))?$`)
+
+// seconds matches an advance step's duration.
+var seconds = regexp.MustCompile(`^([0-9]+)s$`)
 
 func TestVectors(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(vectors, "*.json"))
@@ -93,6 +97,7 @@ type step struct {
 	Nack        string            `json:"nack,omitempty"`
 	Kept        []string          `json:"kept,omitempty"`
 	Disconnect  string            `json:"disconnect,omitempty"`
+	Advance     string            `json:"advance,omitempty"`
 	Expect      []response        `json:"expect,omitempty"`
 	Comment     string            `json:"comment,omitempty"`
 }
@@ -316,6 +321,14 @@ func (r *run) perform(s step) error {
 		}
 		e.conn.closeSend()
 		e.conn.closing = true
+		return nil
+	case s.Advance != "":
+		m := seconds.FindStringSubmatch(s.Advance)
+		if m == nil {
+			return fmt.Errorf(`advance takes seconds, such as "30s": %q`, s.Advance)
+		}
+		n, _ := strconv.Atoi(m[1])
+		time.Sleep(time.Duration(n) * time.Second) // the bubble's clock moves on; nothing else happens
 		return nil
 	}
 	return errors.New("unknown step")
