@@ -64,23 +64,19 @@ func replayVector(t *testing.T, v *vector, protocol string) map[string]any {
 			return result
 		}
 		synctest.Wait() // every response to the step has been sent
-		responses, ended, err := r.replayed()
+		responses, err := r.replayed()
 		if err != nil {
 			result["error"] = err.Error()
 			return result
 		}
 		steps = append(steps, responses)
-		if ended {
-			return result
-		}
 	}
 	return result
 }
 
-// replayed is what each Envoy got since the last step, and whether the Server ended any Envoy's stream.
-func (r *run) replayed() ([]any, bool, error) {
+// replayed is what each Envoy got since the last step, ending with how the Server ended its stream if it did.
+func (r *run) replayed() ([]any, error) {
 	responses := []any{}
-	ended := false
 	for _, e := range r.envoys {
 		c := e.conn
 		if c == nil {
@@ -88,7 +84,7 @@ func (r *run) replayed() ([]any, bool, error) {
 		}
 		rs, err := c.take()
 		if err != nil {
-			return nil, false, fmt.Errorf("envoy %s: %w", e.name, err)
+			return nil, fmt.Errorf("envoy %s: %w", e.name, err)
 		}
 		for _, rcv := range rs {
 			resources := []json.RawMessage{}
@@ -108,11 +104,11 @@ func (r *run) replayed() ([]any, bool, error) {
 				continue
 			}
 			responses = append(responses, map[string]any{"envoy": e.name, "ended": code.Code_name[int32(status.Code(err))]})
-			ended = true
+			e.conn = nil // its next request opens a new stream
 		default:
 		}
 	}
-	return responses, ended, nil
+	return responses, nil
 }
 
 // replayed replays a vector given as JSON, and gives the result as JSON with sorted keys.
@@ -162,12 +158,14 @@ func TestReplayPrintsWhatEachEnvoyGotLeavingOutAnAckOfNoResponse(t *testing.T) {
 	}
 }
 
-func TestReplayStopsAtAStreamTheServerEnds(t *testing.T) {
+func TestReplayCarriesOnAfterAStreamTheServerEnds(t *testing.T) {
 	got := replayed(t, `{"name": "v", "protocols": ["delta"], "serves": ["CDS"], "envoys": [{"name": "e", "view": "v"}], "steps": [
 		{"request": "CDS", "subscribe": ["a"], "unsubscribe": ["a"]},
 		{"request": "CDS"}]}`)
 
-	want := `{"name": "v", "runs": {"delta": {"steps": [[{"envoy": "e", "ended": "INVALID_ARGUMENT"}]]}}}`
+	want := `{"name": "v", "runs": {"delta": {"steps": [
+		[{"envoy": "e", "ended": "INVALID_ARGUMENT"}],
+		[{"envoy": "e", "type": "CDS", "resources": [], "removed": []}]]}}}`
 	if canonical(t, got) != canonical(t, want) {
 		t.Errorf("got %s\nwant %s", canonical(t, got), canonical(t, want))
 	}
