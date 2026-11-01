@@ -9,7 +9,7 @@ import (
 type service[R request, U any] interface {
 	typeURL() TypeURL
 	// process handles a request for its type: an ACK or NACK, a subscription change, or both.
-	process(req R) error
+	process(req R)
 	awaitingAck() bool
 	// addsToCome reports whether the staged change's add round is still to be sent.
 	addsToCome() bool

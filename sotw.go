@@ -21,12 +21,12 @@ type sotwService[U, D any] struct {
 	awaiting bool   // for Envoy to ACK or NACK it
 }
 
-func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) error {
+func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) {
 	s.active = true
 	if s.nonce != "" {
 		if req.GetResponseNonce() != s.nonce {
 			s.log.Debug("Ignoring a request answering an earlier response", "type", s.typ, "nonce", req.GetResponseNonce())
-			return nil
+			return
 		}
 		// An ACK names the version it accepts, and a NACK has error detail: the manager sends no more changes after
 		// one. Anything else answers nothing.
@@ -42,7 +42,6 @@ func (s *sotwService[U, D]) process(req *discoveryv3.DiscoveryRequest) error {
 	if added, changed := s.subs.update(req.GetResourceNames()); changed {
 		s.subscriptionChanged(added)
 	}
-	return nil
 }
 
 func (s *sotwService[U, D]) subscriptionChanged(added func(string) bool) {

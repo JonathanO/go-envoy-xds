@@ -8,8 +8,6 @@ import (
 	"time"
 
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	xds "github.com/JonathanO/go-envoy-xds"
 	"github.com/JonathanO/go-envoy-xds/snapshot"
@@ -140,17 +138,6 @@ func TestDeltaReconnectingMidChangeKeepsWhatTheChangeRemovesUntilItsTurn(t *test
 		}
 		if sent := e.ack(rds[0]); len(sent) != 1 || !slices.Equal(sent[0].GetRemovedResources(), []string{"x"}) {
 			t.Fatalf("got %v after r2's removal is ACKed, want x removed", sent)
-		}
-	})
-}
-
-func TestDeltaSubscribingToAndUnsubscribingFromANameAtOnceEndsTheStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := startDelta(t, newServer(t, newSource(), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		e.stream.reqs <- &discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.EndpointType),
-			ResourceNamesSubscribe: []string{"a"}, ResourceNamesUnsubscribe: []string{"a"}}
-		if err := <-e.ended; status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("got %v, want InvalidArgument", err)
 		}
 	})
 }

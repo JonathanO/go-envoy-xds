@@ -136,15 +136,12 @@ func FuzzDeltaSubs(f *testing.F) {
 			}
 			explicit, all, first := set{}, false, true
 			for i := 0; i+1 < len(reqs); i += 2 {
-				sub, unsub := namesOf(reqs[i]), namesOf(reqs[i+1]&^(reqs[i]&7)) // never a name in both, but the wildcard may be
+				sub, unsub := namesOf(reqs[i]), namesOf(reqs[i+1])
 				if !wild {
 					sub, unsub = withoutWildcard(sub), withoutWildcard(unsub)
 				}
 				before := subscribedTo(s)
-				added, changed, err := s.update(sub, unsub)
-				if err != nil {
-					t.Fatal(err)
-				}
+				added, changed := s.update(sub, unsub)
 				after := subscribedTo(s)
 				checkAdded(t, before, after, added, changed)
 				if s.subscribed(wildcard) || added != nil && added(wildcard) {
@@ -161,21 +158,21 @@ func FuzzDeltaSubs(f *testing.F) {
 					}
 				}
 				// The spec's model: names subscribed to explicitly, and the wildcard, which a first request naming
-				// nothing also means.
-				for _, n := range withoutWildcard(sub) {
-					explicit[n] = struct{}{}
-				}
+				// nothing also means. A name in both, the wildcard included, is subscribed to.
 				for _, n := range withoutWildcard(unsub) {
 					delete(explicit, n)
+				}
+				for _, n := range withoutWildcard(sub) {
+					explicit[n] = struct{}{}
 				}
 				wasAll := all
 				switch {
 				case wild && first && len(sub) == 0 && len(unsub) == 0:
 					all = true
-				case slices.Contains(unsub, wildcard): // unsubscribing wins
-					all = false
 				case slices.Contains(sub, wildcard):
 					all = true
+				case slices.Contains(unsub, wildcard):
+					all = false
 				}
 				first = false
 				// Unsubscribing needs no answer, and an empty one would hold up pushes until Envoy ACKed it.
@@ -192,11 +189,39 @@ func FuzzDeltaSubs(f *testing.F) {
 	})
 }
 
-func TestDeltaSubscribingToAndUnsubscribingFromOneNameIsAnError(t *testing.T) {
-	for _, s := range []deltaSubs{&deltaNames{}, &deltaWildcard{}} {
-		if added, changed, err := s.update([]string{"a"}, []string{"a"}); err == nil || added != nil || changed {
-			t.Fatalf("%T: got %v, %v, want an error", s, added != nil, changed)
-		}
+func TestDeltaSubscribeUnsubscribeSameResourceSubscribes(t *testing.T) {
+	s := &deltaNames{}
+	s.update([]string{"foo"}, nil)
+
+	// Subscribing wins, whether it was subscribed to already or not, and both are answered.
+	added, changed := s.update([]string{"foo", "bar"}, []string{"foo", "bar"})
+	if !changed || !added("foo") || !added("bar") || added("baz") {
+		t.Fatalf("got changed %v, answering foo %v, bar %v, baz %v", changed, added("foo"), added("bar"), added("baz"))
+	}
+	if !s.subscribed("foo") || !s.subscribed("bar") {
+		t.Fatalf("subscribed to foo %v, bar %v", s.subscribed("foo"), s.subscribed("bar"))
+	}
+}
+
+func TestDeltaWildcardInBothListsIsSubscribed(t *testing.T) {
+	w := &deltaWildcard{}
+	w.update([]string{"foo"}, nil)
+
+	// Subscribing wins, as for names: the wildcard starts.
+	added, changed := w.update([]string{wildcard}, []string{wildcard})
+	if !changed || !added("bar") || added("foo") || added(wildcard) {
+		t.Fatalf("got changed %v, answering bar %v, foo %v, * %v", changed, added("bar"), added("foo"), added(wildcard))
+	}
+	if !w.subscribed("bar") {
+		t.Fatal("not subscribed to bar")
+	}
+
+	// And it doesn't start again, so there's nothing to answer.
+	if added, changed := w.update([]string{wildcard}, []string{wildcard}); changed || added != nil {
+		t.Fatalf("got changed %v, answer %v", changed, added != nil)
+	}
+	if !w.subscribed("bar") {
+		t.Fatal("not subscribed to bar")
 	}
 }
 
