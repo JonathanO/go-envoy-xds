@@ -199,9 +199,7 @@ func serve[R request, S any, U, D any](srv *Server[U, D], stream adsStream[R, S]
 			m.init(srv.source.Subscribe(client.Config.Details, mb.put))
 			ready = mb.ready
 		}
-		if err := m.process(req); err != nil {
-			return status.Error(codes.InvalidArgument, err.Error())
-		}
+		m.process(req)
 		return nil
 	}
 	for {

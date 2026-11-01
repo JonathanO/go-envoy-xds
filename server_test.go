@@ -278,10 +278,6 @@ func TestStreamErrorsAreWarnedAboutUnlessEnvoyWentAway(t *testing.T) {
 		"cancelled": {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Canceled, "gone") }, 0},
 		"context":   {func(e *deltaEnvoy) { e.stream.errs <- context.Canceled }, 0},
 		"broken":    {func(e *deltaEnvoy) { e.stream.errs <- status.Error(codes.Unavailable, "broken") }, 1},
-		"invalid": {func(e *deltaEnvoy) {
-			e.stream.reqs <- &discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType),
-				ResourceNamesSubscribe: []string{"a"}, ResourceNamesUnsubscribe: []string{"a"}}
-		}, 1},
 	} {
 		synctest.Test(t, func(t *testing.T) {
 			l := &logs{}

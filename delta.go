@@ -23,21 +23,16 @@ type deltaService[U, D any] struct {
 	answeredDuringChange map[string]proto.Message
 }
 
-func (s *deltaService[U, D]) process(req *discoveryv3.DeltaDiscoveryRequest) error {
+func (s *deltaService[U, D]) process(req *discoveryv3.DeltaDiscoveryRequest) {
 	s.active = true
 	// An ACK, or a NACK if it has error detail: either way, answered. The manager sends no more changes after a NACK.
 	if req.GetResponseNonce() == s.unanswered {
 		s.unanswered = ""
 	}
 	// Envoy puts subscription changes it has queued into its ACKs, so one request can do both.
-	added, changed, err := s.subs.update(req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe())
-	if err != nil {
-		return err
-	}
-	if changed {
+	if added, changed := s.subs.update(req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe()); changed {
 		s.subscriptionChanged(req.GetResourceNamesSubscribe(), added, req.GetInitialResourceVersions())
 	}
-	return nil
 }
 
 func (s *deltaService[U, D]) subscriptionChanged(names []string, added func(string) bool, kept map[string]string) {

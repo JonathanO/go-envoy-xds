@@ -160,11 +160,13 @@ func TestReplayPrintsWhatEachEnvoyGotLeavingOutAnAckOfNoResponse(t *testing.T) {
 
 func TestReplayCarriesOnAfterAStreamTheServerEnds(t *testing.T) {
 	got := replayed(t, `{"name": "v", "protocols": ["delta"], "serves": ["CDS"], "envoys": [{"name": "e", "view": "v"}], "steps": [
-		{"request": "CDS", "subscribe": ["a"], "unsubscribe": ["a"]},
+		{"request": "CDS"},
+		{"resync": "e"},
 		{"request": "CDS"}]}`)
 
 	want := `{"name": "v", "runs": {"delta": {"steps": [
-		[{"envoy": "e", "ended": "INVALID_ARGUMENT"}],
+		[{"envoy": "e", "type": "CDS", "resources": [], "removed": []}],
+		[{"envoy": "e", "ended": "OK"}],
 		[{"envoy": "e", "type": "CDS", "resources": [], "removed": []}]]}}}`
 	if canonical(t, got) != canonical(t, want) {
 		t.Errorf("got %s\nwant %s", canonical(t, got), canonical(t, want))

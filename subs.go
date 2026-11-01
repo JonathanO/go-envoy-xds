@@ -1,7 +1,6 @@
 package xds
 
 import (
-	"fmt"
 	"maps"
 	"slices"
 )
@@ -93,7 +92,7 @@ func (w *sotwWildcard) subscribed(name string) bool { return w.all || w.names.su
 
 type deltaSubs interface {
 	// update takes the names a delta request subscribes to and unsubscribes from.
-	update(subscribe, unsubscribe []string) (added func(string) bool, changed bool, err error)
+	update(subscribe, unsubscribe []string) (added func(string) bool, changed bool)
 	subscribed(name string) bool
 }
 
@@ -101,27 +100,22 @@ type deltaNames struct {
 	subs set
 }
 
-func (s *deltaNames) update(subscribe, unsubscribe []string) (func(string) bool, bool, error) {
-	drop := setOf(unsubscribe)
-	for _, n := range subscribe {
-		// The spec doesn't say which should win, and either could be wrong.
-		if drop.has(n) {
-			return nil, false, fmt.Errorf("subscribed to and unsubscribed from %q in one request", n)
-		}
-	}
+func (s *deltaNames) update(subscribe, unsubscribe []string) (func(string) bool, bool) {
 	if s.subs == nil {
 		s.subs = set{}
 	}
-	added := setOf(subscribe)
-	maps.Copy(s.subs, added)
-	for n := range drop {
+	// A name in both is subscribed to: the xDS spec doesn't say which wins, and a resource Envoy doesn't want does less
+	// harm than missing one it does.
+	for _, n := range unsubscribe {
 		delete(s.subs, n)
 	}
+	added := setOf(subscribe)
+	maps.Copy(s.subs, added)
 	if len(subscribe) == 0 {
 		// Unsubscribing needs no answer, and an empty one would hold up pushes until Envoy ACKed it.
-		return nil, false, nil
+		return nil, false
 	}
-	return added.has, true, nil
+	return added.has, true
 }
 
 func (s *deltaNames) subscribed(name string) bool { return s.subs.has(name) }
@@ -134,37 +128,35 @@ type deltaWildcard struct {
 	names   deltaNames
 }
 
-func (w *deltaWildcard) update(subscribe, unsubscribe []string) (func(string) bool, bool, error) {
+func (w *deltaWildcard) update(subscribe, unsubscribe []string) (func(string) bool, bool) {
 	if !w.started {
 		w.started = true
 		// The legacy wildcard: a first request naming nothing.
 		if len(subscribe) == 0 && len(unsubscribe) == 0 {
 			w.all = true
-			return notWildcard, true, nil
+			return notWildcard, true
 		}
 	}
 	was := w.all
+	// Subscribing wins, as for names. The names leave the wildcard be: none is the wildcard.
+	if slices.Contains(unsubscribe, wildcard) {
+		w.all = false
+	}
 	if slices.Contains(subscribe, wildcard) {
 		w.all = true
 		subscribe = withoutWildcard(subscribe)
 	}
-	if slices.Contains(unsubscribe, wildcard) {
-		w.all = false // unsubscribing wins, and the names leave it be: none is the wildcard
-	}
 	newlyAll := w.all && !was
-	added, changed, err := w.names.update(subscribe, unsubscribe)
-	if err != nil {
-		return nil, false, err
-	}
+	added, changed := w.names.update(subscribe, unsubscribe)
 	if !newlyAll {
 		// Names added while subscribed to all still need an answer: the spec requires one, removing those that don't
 		// exist.
-		return added, changed, nil
+		return added, changed
 	}
 	// Newly subscribed to everything not subscribed to by name, and to whatever this request named.
 	return func(n string) bool {
 		return n != wildcard && (!w.names.subscribed(n) || (added != nil && added(n)))
-	}, true, nil
+	}, true
 }
 
 func (w *deltaWildcard) subscribed(name string) bool {

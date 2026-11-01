@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"slices"
-	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -20,8 +19,6 @@ import (
 	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -160,8 +157,7 @@ func fuzzStream[Req, Resp any](t *testing.T, d *draws, p protocol[Req, Resp]) {
 		select {
 		case err := <-e.ended:
 			live = false
-			violation := status.Code(err) == codes.InvalidArgument && strings.Contains(err.Error(), "subscribed to and unsubscribed from")
-			if !envoyEnded && err != nil && !violation {
+			if !envoyEnded && err != nil {
 				t.Fatalf("the stream ended with %v", err)
 			}
 		default:
@@ -206,12 +202,12 @@ func (s *subscription) hear(req any, wild bool) {
 		sub, unsub := req.GetResourceNamesSubscribe(), req.GetResourceNamesUnsubscribe()
 		legacy := !s.before && len(sub) == 0 && len(unsub) == 0
 		s.before = true
-		s.all = wild && (s.all || legacy || slices.Contains(sub, "*")) && !slices.Contains(unsub, "*") // unsubscribing wins
-		for _, n := range sub {
-			s.names[n] = true
-		}
+		s.all = wild && ((s.all && !slices.Contains(unsub, "*")) || legacy || slices.Contains(sub, "*")) // subscribing wins
 		for _, n := range unsub {
 			delete(s.names, n)
+		}
+		for _, n := range sub {
+			s.names[n] = true
 		}
 	}
 }

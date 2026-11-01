@@ -15,8 +15,6 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	xds "github.com/JonathanO/go-envoy-xds"
 	"github.com/JonathanO/go-envoy-xds/snapshot"
@@ -144,19 +142,6 @@ func TestAnAckOfRoutesIsNeverHeld(t *testing.T) {
 		e.subscribe(xds.EndpointType, "a") // so the clusters await an ACK
 		if lds := e.ack(rds); !slices.Equal(types(lds), []xds.TypeURL{xds.ListenerType}) || !slices.Equal(lds[0].GetRemovedResources(), []string{"l"}) {
 			t.Fatalf("got %v after the route ACK, want the listener removed", lds)
-		}
-	})
-}
-
-func TestAHeldRequestThatIsInvalidEndsTheStream(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := startDelta(t, newServer(t, newSource(cluster("a")), xds.EnvoyConfig[string]{}, xds.Events[string]{}))
-		cds := e.subscribe(xds.ClusterType)[0]
-		e.send(&discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.RouteType),
-			ResourceNamesSubscribe: []string{"r"}, ResourceNamesUnsubscribe: []string{"r"}})
-		e.stream.reqs <- &discoveryv3.DeltaDiscoveryRequest{Node: node, TypeUrl: string(xds.ClusterType), ResponseNonce: cds.GetNonce()}
-		if err := <-e.ended; status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("got %v, want InvalidArgument", err)
 		}
 	})
 }

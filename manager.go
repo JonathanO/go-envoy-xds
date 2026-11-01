@@ -91,25 +91,20 @@ func (m *manager[R, U]) init(state U, unsubscribe func()) {
 }
 
 // process handles a request for a type we know.
-func (m *manager[R, U]) process(req R) error {
+func (m *manager[R, U]) process(req R) {
 	if m.mustWait(req) {
 		if req.GetErrorDetail() != nil {
 			m.freeze() // at once, though what it asks for waits its turn
 		}
 		m.held = append(m.held, req)
-		return nil
+		return
 	}
-	if err := m.handle(req); err != nil {
-		return err
-	}
+	m.handle(req)
 	for len(m.held) > 0 && !m.clustersPending() {
 		req := m.held[0]
 		m.held = m.held[1:]
-		if err := m.handle(req); err != nil {
-			return err
-		}
+		m.handle(req)
 	}
-	return nil
 }
 
 // mustWait reports whether to answer a request later, in add order: see usesClusters. It never overtakes a held request
@@ -122,11 +117,9 @@ func (m *manager[R, U]) mustWait(req R) bool {
 	return usesClusters(t) && !m.services[t].awaitingAck() && m.clustersPending()
 }
 
-func (m *manager[R, U]) handle(req R) error {
+func (m *manager[R, U]) handle(req R) {
 	s := m.services[TypeURL(req.GetTypeUrl())]
-	if err := s.process(req); err != nil {
-		return err
-	}
+	s.process(req)
 	if req.GetErrorDetail() != nil {
 		m.freeze()
 	}
@@ -136,7 +129,6 @@ func (m *manager[R, U]) handle(req R) error {
 	} else {
 		m.pushAllowedWork()
 	}
-	return nil
 }
 
 // updatesWaiting is called when the mailbox may have updates.

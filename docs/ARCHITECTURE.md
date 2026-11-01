@@ -97,8 +97,9 @@ once it ACKs), as each SotW response must be the whole set.
 for which names a stream wants. Listeners, clusters, scoped routes and virtual hosts are *wildcard* types: Envoy may
 subscribe to every resource at once, with `*` or, on its first request, by naming nothing (the *legacy wildcard*).
 `sotwNames` and `deltaNames` track names; `sotwWildcard` and `deltaWildcard` add the wildcard. Each `update` returns
-`added`, which names the request newly subscribed to (nil if none), and `changed`. A delta request that both subscribes
-to and unsubscribes from one name is an error, which ends the stream with `InvalidArgument`.
+`added`, which names the request newly subscribed to (nil if none), and `changed`. A name a delta request both
+subscribes to and unsubscribes from, `*` included, is subscribed to: the xDS spec doesn't say which wins, and a resource
+Envoy doesn't want does less harm than missing one it does.
 
 **The mailbox** is the only state of a stream that another goroutine changes, apart from the request channel and
 cancelling the stream's context. `put` is what the Source calls to deliver; `take` is what the manager calls to start
