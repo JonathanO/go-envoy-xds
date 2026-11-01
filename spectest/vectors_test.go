@@ -29,7 +29,9 @@ import (
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
+	"google.golang.org/genproto/googleapis/rpc/code"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -98,6 +100,7 @@ type step struct {
 	Kept        []string          `json:"kept,omitempty"`
 	Disconnect  string            `json:"disconnect,omitempty"`
 	Advance     string            `json:"advance,omitempty"`
+	Resync      string            `json:"resync,omitempty"`
 	Expect      []response        `json:"expect,omitempty"`
 	Comment     string            `json:"comment,omitempty"`
 }
@@ -116,6 +119,7 @@ type op struct {
 
 type response struct {
 	Type, Envoy, As string
+	Ended           string // the server ended the stream with this gRPC status code, instead of a response
 	contents
 	Sotw, Delta *contents
 	Comment     string
@@ -224,6 +228,7 @@ type run struct {
 	srv       *xds.Server[*snapshot.Update, string]
 	envoys    []*envoy
 	labels    map[string]*received
+	clients   map[string]*xds.Client[string] // each Envoy's latest stream, by node ID, for resync steps
 }
 
 func runVector(t *testing.T, v *vector, protocol string) {
@@ -251,7 +256,7 @@ func newRun(ctx context.Context, v *vector, protocol string) (*run, error) {
 	if protocol != "sotw" && protocol != "delta" {
 		return nil, fmt.Errorf("unknown protocol %q", protocol)
 	}
-	r := &run{delta: protocol == "delta", ctx: ctx, labels: map[string]*received{}}
+	r := &run{delta: protocol == "delta", ctx: ctx, labels: map[string]*received{}, clients: map[string]*xds.Client[string]{}}
 	views := map[string]string{}
 	configs := map[string]xds.EnvoyConfig[string]{}
 	for _, e := range v.Envoys {
@@ -296,6 +301,7 @@ func newRun(ctx context.Context, v *vector, protocol string) (*run, error) {
 			}
 			return cfg, nil
 		},
+		Events: xds.Events[string]{Connected: func(c *xds.Client[string]) { r.clients[c.Node.GetId()] = c }},
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -321,6 +327,17 @@ func (r *run) perform(s step) error {
 		}
 		e.conn.closeSend()
 		e.conn.closing = true
+		return nil
+	case s.Resync != "":
+		e, err := r.envoy(s.Resync)
+		if err != nil {
+			return err
+		}
+		c, ok := r.clients[e.name]
+		if !ok || e.conn == nil {
+			return fmt.Errorf("%s has no stream to resync", e.name)
+		}
+		c.Resync()
 		return nil
 	case s.Advance != "":
 		m := seconds.FindStringSubmatch(s.Advance)
@@ -411,7 +428,9 @@ func (r *run) request(s step) error {
 		return err
 	}
 	typ, err := typeURL(s.Request)
-	if err != nil {
+	if err != nil && strings.HasPrefix(s.Request, "type.googleapis.com/") {
+		typ = xds.TypeURL(s.Request) // not one of the eight: sent as it is
+	} else if err != nil {
 		return err
 	}
 	if s.Ack != "" && s.Nack != "" {
@@ -493,7 +512,7 @@ func (r *run) request(s step) error {
 func (r *run) check(s step) error {
 	want := map[*envoy][]response{}
 	for _, resp := range s.Expect {
-		e, err := r.envoy(cmp.Or(resp.Envoy, s.Envoy)) // a request's responses go to its Envoy
+		e, err := r.envoy(cmp.Or(resp.Envoy, s.Envoy, s.Resync)) // a request's responses go to its Envoy
 		if err != nil {
 			return err
 		}
@@ -502,7 +521,13 @@ func (r *run) check(s step) error {
 	var report strings.Builder
 	matched := true
 	for _, e := range r.envoys {
+		wanted := want[e]
+		var end string // the code the step expects the server to end this Envoy's stream with
+		if n := len(wanted); n > 0 && wanted[n-1].Ended != "" {
+			end, wanted = wanted[n-1].Ended, wanted[:n-1]
+		}
 		var responses []*received
+		ended := ""
 		if c := e.conn; c != nil {
 			var err error
 			if responses, err = c.take(); err != nil {
@@ -511,17 +536,20 @@ func (r *run) check(s step) error {
 			select {
 			case err := <-c.ended:
 				if !c.closing || err != nil {
-					return fmt.Errorf("the server ended envoy %s's stream: %v", e.name, err)
+					ended = code.Code_name[int32(status.Code(err))]
 				}
-				e.conn = nil
+				e.conn = nil // its next request opens a new stream
 			default:
 				if c.closing {
 					return fmt.Errorf("envoy %s's stream didn't end when it closed it", e.name)
 				}
 			}
 		}
+		if ended != end {
+			return fmt.Errorf("envoy %s: expected its stream to end with %q, but it ended with %q", e.name, end, ended)
+		}
 		var expected []got
-		for _, resp := range want[e] {
+		for _, resp := range wanted {
 			g, err := r.expected(resp)
 			if err != nil {
 				return err
@@ -536,7 +564,7 @@ func (r *run) check(s step) error {
 		matched = matched && ok
 		fmt.Fprintf(&report, "envoy %s expected:\n%s\nbut got:\n%s\n", e.name, show(expected), show(actual))
 		if ok {
-			for i, resp := range want[e] {
+			for i, resp := range wanted {
 				if resp.As == "" {
 					continue
 				}
