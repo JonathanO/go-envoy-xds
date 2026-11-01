@@ -340,9 +340,12 @@ Keep the `*Client` from `Connected` to resync an Envoy later. Each stream has it
 only from that stream's goroutine, so fields of its own need no lock; anything shared between streams does:
 
 ```go
-var pushesUnderWay atomic.Int64
+var pushesUnderWay, frozen atomic.Int64
 
-type streamMetrics struct{ began time.Time }
+type streamMetrics struct {
+	began  time.Time
+	frozen bool
+}
 
 func (m *streamMetrics) PushBegan() { m.began = time.Now(); pushesUnderWay.Add(1) }
 
@@ -354,10 +357,14 @@ func (m *streamMetrics) PushCompleted() {
 
 func (m *streamMetrics) AwaitingAck() {}
 func (m *streamMetrics) Acked()       {}
+func (m *streamMetrics) Frozen()      { frozen.Add(1); m.frozen = true }
 
 func (m *streamMetrics) Closed() {
 	if !m.began.IsZero() { // ended mid-push
 		pushesUnderWay.Add(-1)
+	}
+	if m.frozen {
+		frozen.Add(-1)
 	}
 }
 ```
@@ -367,6 +374,8 @@ with `Metrics: func() xds.Metrics { return &streamMetrics{} }`.
 - `PushBegan` and `PushCompleted` bracket each change: completed once Envoy ACKs the last of it, or a NACK stops it.
   A stream that ends mid-push gets `Closed` without `PushCompleted`.
 - `AwaitingAck` and `Acked` bracket answers to subscriptions, and removals after a reconnect.
+- `Frozen`: Envoy NACKed, so the stream gets no more changes until it ends. Alert on the gauge: a frozen Envoy
+  serves its last good config until it reconnects.
 - A stream with no push under way, and every `AwaitingAck` matched by an `Acked`, is idle.
 
 **Logging** goes to `ServerConfig.Logger`, a `*slog.Logger`, or `slog.Default()` if nil. NACKs, requests for unknown

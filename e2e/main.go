@@ -283,6 +283,7 @@ func (m *idleness) PushBegan()     { m.touch(); m.pushing.Store(true) }
 func (m *idleness) PushCompleted() { m.touch(); m.pushing.Store(false) }
 func (m *idleness) AwaitingAck()   { m.touch(); m.outstanding.Add(1) }
 func (m *idleness) Acked()         { m.touch(); m.outstanding.Add(-1) }
+func (m *idleness) Frozen()        {}
 func (m *idleness) Closed()        { m.PushCompleted() }
 
 func (m *idleness) idle() bool {

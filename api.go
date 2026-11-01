@@ -130,6 +130,10 @@ type Metrics interface {
 	AwaitingAck()
 	// Acked is called when Envoy ACKs, or NACKs, what AwaitingAck was called for.
 	Acked()
+	// Frozen is called once, when Envoy NACKs and the stream freezes: it gets no more changes until it ends, and Envoy
+	// keeps its last good config. Closed follows when the stream ends, so a gauge of frozen streams goes up here and
+	// down in Closed. If a push was under way, PushCompleted is called first.
+	Frozen()
 	// Closed is called when the stream ends.
 	Closed()
 }
@@ -140,6 +144,7 @@ func (noMetrics) PushBegan()     {}
 func (noMetrics) PushCompleted() {}
 func (noMetrics) AwaitingAck()   {}
 func (noMetrics) Acked()         {}
+func (noMetrics) Frozen()        {}
 func (noMetrics) Closed()        {}
 
 // waitForAck is the longest we wait for an ACK of a type this Envoy may never subscribe to: before removing stale
