@@ -147,10 +147,34 @@ src.Update(func(c *snapshot.Change[string, string]) {
 ```
 
 Only the Envoys whose view has a group you changed are woken, and each compares only the names you touched.
-`EditGroup` edits a group in place. `SetGroup` replaces it with a `Snapshot` you built, and compares every name in
-it, so prefer `EditGroup` for small changes to big groups. `RemoveGroup` removes one.
+`EditGroup` edits a group in place. `SetGroup` replaces it with a `Snapshot` you built: either way Envoys compare only
+the names that changed. Putting a resource equal to the one already there changes nothing, so a group rebuilt with
+nothing changed wakes nobody. `RemoveGroup` removes one.
 
 `edit` runs with the Source locked: don't call the Source from inside it.
+
+Rebuilding a group, whether you set it or put everything through its editor, still builds and compares every resource
+in it on every update. Put what views have in common in a group of its own, in every view that sees it, such as a group
+per upstream service, rather than a copy in each view's own group: a change is then one edit, and Envoys share one copy
+of each resource. If you rebuild groups from inputs that carry a revision, such as a database version, skip the ones
+whose revision hasn't changed. Build snapshots before calling `Update`, so connecting Envoys don't wait while you do:
+
+```go
+changed := map[string]*snapshot.Snapshot{}
+for profile, in := range inputs {
+	if in.Revision != published[profile] {
+		changed[profile] = render(in)
+	}
+}
+src.Update(func(c *snapshot.Change[string, string]) {
+	for profile, g := range changed {
+		c.SetGroup(profile, g)
+	}
+})
+for profile := range changed {
+	published[profile] = inputs[profile].Revision
+}
+```
 
 ## 3. Per-Envoy config
 

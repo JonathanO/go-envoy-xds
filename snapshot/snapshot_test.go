@@ -379,7 +379,7 @@ func TestAChangeHiddenByAnEarlierGroupSendsNothing(t *testing.T) {
 	}
 }
 
-func TestSetGroupComparesEveryName(t *testing.T) {
+func TestSetGroupComparesOnlyWhatChanged(t *testing.T) {
 	s := snapshot.New[string, string, string](everyone)
 	s.Update(func(c *snapshot.Change[string, string]) {
 		c.SetView("v", "g")
@@ -396,6 +396,23 @@ func TestSetGroupComparesEveryName(t *testing.T) {
 	}
 	if removes := b.RemoveOrder((*got)[0], all, ""); !slices.Equal(removes.Removes, []string{"b"}) {
 		t.Fatalf("removed %v, want b", removes.Removes)
+	}
+}
+
+func TestSetGroupWithAnEqualGroupWakesNobodyAndKeepsItsResources(t *testing.T) {
+	s := snapshot.New[string, string, string](everyone)
+	same := cluster("a", 1)
+	s.Update(func(c *snapshot.Change[string, string]) {
+		c.SetView("v", "g")
+		c.EditGroup("g", func(e *snapshot.Editor) { e.Put(same) })
+	})
+	e := snapshot.Empty().Edit()
+	e.Put(cluster("a", 1))
+	if got := s.Update(func(c *snapshot.Change[string, string]) { c.SetGroup("g", e.Build()) }); len(got) != 0 {
+		t.Fatalf("woke %v", got)
+	}
+	if got, _ := s.Group("g").Resource(xds.ClusterType, "a"); got != same {
+		t.Fatalf("kept %v, want the old instance", got)
 	}
 }
 
