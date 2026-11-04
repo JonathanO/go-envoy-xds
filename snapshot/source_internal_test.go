@@ -189,3 +189,18 @@ func TestThenStartsAPhaseOnlyIfThisOneHasEdits(t *testing.T) {
 		t.Fatalf("%d phases, want one for the view, one for the group, and the one started after", len(c.phases))
 	}
 }
+
+func TestSetGroupTouchesOnlyWhatChanged(t *testing.T) {
+	s := New[string, string, string](func(d string) string { return d })
+	s.Update(func(c *Change[string, string]) {
+		c.SetView("v", "g")
+		c.EditGroup("g", func(e *Editor) { e.Put(&clusterv3.Cluster{Name: "a"}); e.Put(&clusterv3.Cluster{Name: "same"}) })
+	})
+	e := Empty().Edit()
+	e.Put(&clusterv3.Cluster{Name: "b"})
+	e.Put(&clusterv3.Cluster{Name: "same"})
+	got := s.Update(func(c *Change[string, string]) { c.SetGroup("g", e.Build()) })["v"].candidates(xds.ClusterType)
+	if want := []string{"a", "b"}; !slices.Equal(slices.Sorted(maps.Keys(got)), want) {
+		t.Fatalf("compares %v, want %v", slices.Sorted(maps.Keys(got)), want)
+	}
+}

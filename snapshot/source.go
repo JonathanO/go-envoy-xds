@@ -268,12 +268,24 @@ func (c *Change[G, V]) EditGroup(name G, edit func(e *Editor)) {
 	p.groups[name] = e.Build()
 }
 
-// SetGroup replaces a group with a snapshot made however you like. Every name in the old and new group is compared.
+// SetGroup replaces a group with a snapshot made however you like, such as one rebuilt from scratch. It's compared
+// with the old group here, once, so Envoys compare only the names that changed, and a resource equal to the old one
+// keeps the old one. Build the snapshot before calling Update, which holds the Source's lock while edit runs.
 func (c *Change[G, V]) SetGroup(name G, s *Snapshot) {
-	p := c.last()
-	p.touchAll(name, c.Group(name))
-	p.touchAll(name, s)
-	p.groups[name] = s
+	c.EditGroup(name, func(e *Editor) {
+		for t, rs := range c.Group(name).resources {
+			for n := range rs {
+				if _, ok := s.resources[t][n]; !ok {
+					e.Remove(t, n)
+				}
+			}
+		}
+		for _, rs := range s.resources {
+			for n, m := range rs {
+				e.PutNamed(n, m)
+			}
+		}
+	})
 }
 
 // RemoveGroup removes a group. Views listing it see nothing of it until it's added again.
